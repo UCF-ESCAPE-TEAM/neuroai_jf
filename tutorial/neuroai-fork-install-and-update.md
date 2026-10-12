@@ -4,8 +4,18 @@ This tutorial covers how to install NeuralTrain and NeuralBench from your own fo
 `facebookresearch/neuroai`, and how to keep every machine up to date when you add new
 models or training code.
 
-Replace `YOUR_USERNAME` with your GitHub username and `emg-pose-cnn` with your branch name
-throughout.
+The commands use this setup:
+
+| Item | Value |
+|---|---|
+| Your repository | `git@github.com:jiruifu/neuroai_jf.git` (remote `origin`) |
+| Original repository | `https://github.com/facebookresearch/neuroai.git` (remote `upstream`) |
+| Working branch | `emg-pose-cnn` (already pushed to `origin`) |
+| Local folder | `neuroai_jf` |
+
+The repository URLs use SSH, so each machine needs an SSH key registered with your GitHub
+account. If the repository is public, `https://github.com/jiruifu/neuroai_jf.git` also works
+without a key.
 
 > **Status of these instructions.** The NeuralBench commands come from its installation
 > page. The `neuraltrain-repo` editable install and the folder paths are inferred from the
@@ -29,28 +39,32 @@ Use **A** unless you have a reason not to. Section 7 covers **B**.
 
 ---
 
-## 2. One-time setup: fork and clone
+## 2. One-time setup per machine: clone
 
-### 2.1 Fork
+### 2.1 The repository
 
-On GitHub, open `https://github.com/facebookresearch/neuroai` and click **Fork**.
+Your copy already exists at `github.com/jiruifu/neuroai_jf`, with the `emg-pose-cnn` branch
+pushed. Nothing more to do on GitHub.
 
-> **Privacy.** A fork of a public repository is public, and GitHub does not let you make it
-> private. If your model code should stay private during the competition, create an empty
-> **private** repository instead and push a clone of `neuroai` to it. Everything below works
-> the same, with your private repository's URL.
+> **Privacy.** If `neuroai_jf` is a fork of the public repository, it is public, and GitHub
+> does not let you make a fork private. If your model code should stay private during the
+> competition, check the repository's visibility in its GitHub settings; a private copy has
+> to be a separate private repository that you push a clone to.
 
-### 2.2 Clone and create a branch
+### 2.2 Clone and switch to the working branch
+
+Skip this on the machine that already has `~/EEG_Challenge/code/neuroai_jf`.
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/neuroai.git
-cd neuroai
+git clone git@github.com:jiruifu/neuroai_jf.git
+cd neuroai_jf
 git remote add upstream https://github.com/facebookresearch/neuroai.git
-git checkout -b emg-pose-cnn
+git checkout emg-pose-cnn
 ```
 
-- `origin` is your fork (you push here).
+- `origin` is your repository (you push here).
 - `upstream` is the original repository (you pull updates from here).
+- Check both with `git remote -v`, and the branch with `git branch -a`.
 
 ---
 
@@ -75,7 +89,7 @@ Leave `neuralset`, `neuralfetch`, `torch` and the other dependencies installed.
 
 ### 3.3 Editable install
 
-From the root of the cloned `neuroai` folder:
+From the root of the cloned `neuroai_jf` folder:
 
 ```bash
 pip install -e neuraltrain-repo
@@ -100,7 +114,7 @@ python -c "import neuraltrain, neuralbench; print(neuraltrain.__file__); print(n
 neuralbench --help
 ```
 
-Both printed paths must point inside your cloned `neuroai` folder. If either contains
+Both printed paths must point inside your cloned `neuroai_jf` folder. If either contains
 `site-packages`, that package is still the PyPI copy: uninstall it and repeat step 3.3.
 
 ---
@@ -170,13 +184,12 @@ git push                             # afterwards
 
 ### 6.2 On every other machine
 
-First time: follow sections 2.2 to 4, using `git checkout emg-pose-cnn` instead of creating
-the branch.
+First time: follow sections 2.2 to 4.
 
 Every time after that:
 
 ```bash
-cd neuroai
+cd neuroai_jf
 git pull
 ```
 
@@ -203,16 +216,19 @@ Use this when you do not want a clone on the machine.
 
 ```bash
 pip install \
-  "neuraltrain @ git+https://github.com/YOUR_USERNAME/neuroai.git@emg-pose-cnn#subdirectory=neuraltrain-repo" \
-  "neuralbench @ git+https://github.com/YOUR_USERNAME/neuroai.git@emg-pose-cnn#subdirectory=neuralbench-repo"
+  "neuraltrain @ git+ssh://git@github.com/jiruifu/neuroai_jf.git@emg-pose-cnn#subdirectory=neuraltrain-repo" \
+  "neuralbench @ git+ssh://git@github.com/jiruifu/neuroai_jf.git@emg-pose-cnn#subdirectory=neuralbench-repo"
 pip install 'eegdash>=0.8.2'
 ```
 
 - Keep both packages in **one** command, so pip takes `neuraltrain` from your fork too.
 - `@emg-pose-cnn` selects the branch. A tag or a commit hash works there as well, and a
   commit hash gives an exactly reproducible install.
-- For a private repository, use `git+ssh://git@github.com/YOUR_USERNAME/neuroai.git` with
-  an SSH key set up on that machine.
+- The `git+ssh://` form needs an SSH key registered with your GitHub account on that
+  machine. For a public repository, `git+https://github.com/jiruifu/neuroai_jf.git` works
+  without one.
+- The repository name must match exactly. `Repository not found` means the name or username
+  in the URL is wrong, or the repository is private and the request was not authenticated.
 
 ### 7.2 Update after you push changes
 
@@ -220,8 +236,8 @@ This install is a snapshot, so it does not follow your branch automatically. Aft
 
 ```bash
 pip install --force-reinstall --no-deps \
-  "neuraltrain @ git+https://github.com/YOUR_USERNAME/neuroai.git@emg-pose-cnn#subdirectory=neuraltrain-repo" \
-  "neuralbench @ git+https://github.com/YOUR_USERNAME/neuroai.git@emg-pose-cnn#subdirectory=neuralbench-repo"
+  "neuraltrain @ git+ssh://git@github.com/jiruifu/neuroai_jf.git@emg-pose-cnn#subdirectory=neuraltrain-repo" \
+  "neuralbench @ git+ssh://git@github.com/jiruifu/neuroai_jf.git@emg-pose-cnn#subdirectory=neuralbench-repo"
 ```
 
 - `--force-reinstall` is needed because the version number has not changed, so pip would
@@ -263,6 +279,8 @@ step 3.3 (or step 7.2 without `--no-deps`).
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| `remote: Repository not found` during `pip install` or `git clone` | Wrong repository name or username in the URL, or a private repository reached over unauthenticated `https` | Copy the URL from `git remote -v`; use the SSH form for a private repository |
+| `Permission denied (publickey)` | No SSH key registered with GitHub on this machine | Add an SSH key to your GitHub account, or use the `https` URL if the repository is public |
 | `__file__` path contains `site-packages` | The PyPI copy is still installed | `pip uninstall`, then step 3.3 |
 | `-m my_model` is not recognised | YAML is missing or misnamed | Check `neuralbench/models/my_model.yaml` exists in the installed package |
 | Model name in the YAML is not found | Missing import in `neuraltrain/models/__init__.py` | Add the import line from section 5 |
@@ -278,7 +296,7 @@ step 3.3 (or step 7.2 without `--no-deps`).
 
 ```bash
 # First install on a machine (option A)
-git clone https://github.com/YOUR_USERNAME/neuroai.git && cd neuroai
+git clone git@github.com:jiruifu/neuroai_jf.git && cd neuroai_jf
 git checkout emg-pose-cnn
 pip uninstall -y neuralbench neuraltrain
 pip install -e neuraltrain-repo
@@ -289,7 +307,7 @@ pip install 'eegdash>=0.8.2'
 git add -A && git commit -m "message" && git push
 
 # Update any other machine
-cd neuroai && git pull
+cd neuroai_jf && git pull
 
 # Pull in upstream changes
 git fetch upstream && git merge upstream/main && git push

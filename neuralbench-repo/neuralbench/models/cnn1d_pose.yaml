@@ -1,3 +1,19 @@
 brain_model_config:
   =replace=: true
   name: "Cnn1dPose"
+
+trainer_config:
+  n_epochs: 50
+  patience: 10
+  precision: "16-mixed"
+
+lightning_optimizer_config:
+  optimizer:
+    lr: 3.0e-4
+
+data:
+  batch_size: 128
+  seed: 33
+
+infra:
+  gpus_per_node: 1
