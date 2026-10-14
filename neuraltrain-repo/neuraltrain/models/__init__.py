@@ -31,3 +31,5 @@ from .base import BaseModelConfig as BaseModelConfig  # used for configs
 from .base import BrainModelBuildContext as BrainModelBuildContext
 from .simpleconv import SimpleConvTimeAgg as SimpleConvTimeAgg
 from . import cnn1d_pose as _cnn1d_pose  # noqa: F401
+
+from . import ulhm_pose as _ulhm_pose  # noqa: F401 

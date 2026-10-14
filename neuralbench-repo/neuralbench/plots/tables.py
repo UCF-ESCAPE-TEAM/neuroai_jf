@@ -234,9 +234,10 @@ def build_results_df(
         key = [c for c in ("model_name", "task_name", "dataset_name") if c in df.columns]
         swept = df.groupby(key, dropna=False)["space_name"].transform("nunique") > 1
         variant = df.get("model_variant", pd.Series("", index=df.index)).fillna("")
-        df.loc[swept, "model_variant"] = (
-            variant[swept] + ";space=" + df.loc[swept, "space_name"]
-        )
+        if swept.any():
+            df.loc[swept, "model_variant"] = (
+                variant[swept] + ";space=" + df.loc[swept, "space_name"].astype(str)
+            )
     df = _disambiguate_model_variants(df)
     df["loss_name"] = df.loss.apply(pd.Series).name
     df["metric_name"] = df.loss_name.map(loss_to_metric_mapping)

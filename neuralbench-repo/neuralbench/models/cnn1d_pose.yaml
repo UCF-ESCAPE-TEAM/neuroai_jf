@@ -17,3 +17,10 @@ data:
 
 infra:
   gpus_per_node: 1
+
+# neuralbench-repo/neuralbench/models/cnn1d_pose.yaml
+brain_model_config:
+  =replace=: true
+  name: "Cnn1dPose"
+
+delete_checkpoints_on_exit: false
