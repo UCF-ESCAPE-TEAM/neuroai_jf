@@ -8,7 +8,7 @@
 # NEMAR NM000281), following the paper's regression setting.
 
 data:
-  batch_size: 64
+  batch_size: 128
   study:
     source:
       name: Salter2024Emg2pose
@@ -31,6 +31,7 @@ data:
   neuro:
     # mne returns SI volts (BDF stores uV); emg2pose trains on the raw HDF5 values in uV.
     # At volt scale VEMG2Pose's first LayerNorm (eps=1e-5) erases the signal.
+    scaler: StandardScaler
     scale_factor: 1.0e+6
     infra:
       # exca's RAM cache never evicts, so retaining any of these 25232
@@ -42,8 +43,8 @@ data:
     name: EmgExtractor
     picks: [misc]
     frequency: 2000.0
-    filter: null
-    notch_filter: null
+    filter: [20, 500]
+    notch_filter: [60.0]
     baseline: null
     scaler: null
     # Radians, as emg2pose trains and logs them; its Table 4 degrees are a

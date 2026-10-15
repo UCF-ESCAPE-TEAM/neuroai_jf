@@ -1,8 +1,26 @@
+# ULHM-style EMG-to-pose model with the EMG front end inside the model.
 brain_model_config:
   =replace=: true
-  name: "UlhmPose"
+  name: UlhmPose
   hidden: 128
   latent: 32
+  dropout: 0.1
   recon_s_weight: 1.0
   consistency_weight: 0.1
   consistency: mse
+  # ---- EMG front end (applied to every window, train and test; no parameters)
+  sfreq: 2000.0
+  highpass: 20.0       # Hz; null = off
+  lowpass: 500.0        # Hz; null = keep up to Nyquist
+  notch: 60.0          # 60.0 to remove mains + harmonics; null = off
+  notch_width: 6.0     # Hz, full stop-band width per notch
+  fir_taps: 2001       # FIR length; 801 is cheaper when notch is null
+  normalize: true      # per-window, per-channel z-score
+  clip: 20.0           # clamp |x| in SD units after z-score; null = off
+data:
+  batch_size: 128
+
+infra:
+  gpus_per_node: 1
+
+delete_checkpoints_on_exit: false

@@ -14,7 +14,11 @@ Port of the MNIST "case 1" recipe (sparse image / full image / shared decoder):
 ``recon_x`` is the task loss neuralbench already applies to ``forward``'s output.
 ``recon_s`` and ``consistency`` are returned by :meth:`auxiliary_losses`, which the
 patched ``BrainModule.training_step`` adds during training. At inference only
-``encoder_x`` and ``decoder`` are used.
+``frontend``, ``encoder_x`` and ``decoder`` are used.
+
+The EMG front end (band-pass, notch, per-window normalization) is part of the
+model so that training, ``check_model`` and the Codabench harness — which hands
+``predict`` raw microvolt windows — all apply the same preprocessing.
 """
 
 import typing as tp
@@ -24,6 +28,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .base import BaseBrainModelConfig
+from .emg_frontend import EmgFrontEnd
 
 
 class UlhmPose(BaseBrainModelConfig):
@@ -43,6 +48,20 @@ class UlhmPose(BaseBrainModelConfig):
         Weight of the latent consistency loss between EMG and pose encoders.
     consistency : {"mse", "cosine"}
         Form of the consistency loss ("mse" as in MNIST case 1).
+    sfreq : float
+        EMG sampling rate (Hz); 2000 for emg2pose.
+    highpass, lowpass : float or None
+        Front-end band-pass cutoffs (Hz). ``None`` disables that side.
+    notch : float or None
+        Mains frequency to remove (with harmonics); ``None`` disables the notch.
+    notch_width : float
+        Full width of each notch stop band (Hz).
+    fir_taps : int
+        Length of the front-end FIR (odd). 2001 at 2 kHz; see EmgFrontEnd.
+    normalize : bool
+        Per-window, per-channel z-score of the EMG after filtering.
+    clip : float or None
+        Clamp |EMG| after normalization (SD units); ``None`` disables.
     """
 
     hidden: int = 128
@@ -51,9 +70,29 @@ class UlhmPose(BaseBrainModelConfig):
     recon_s_weight: float = 1.0
     consistency_weight: float = 0.1
     consistency: tp.Literal["mse", "cosine"] = "mse"
+    # front end
+    sfreq: float = 2000.0
+    highpass: float | None = 20.0
+    lowpass: float | None = None
+    notch: float | None = None
+    notch_width: float = 6.0
+    fir_taps: int = 2001
+    normalize: bool = True
+    clip: float | None = 20.0
 
     def build(self, n_spatial_locations: int, n_outputs: int | None) -> nn.Module:
         assert n_outputs is not None, "UlhmPose requires n_outputs"
+        frontend = EmgFrontEnd(
+            n_channels=n_spatial_locations,
+            sfreq=self.sfreq,
+            highpass=self.highpass,
+            lowpass=self.lowpass,
+            notch=self.notch,
+            notch_width=self.notch_width,
+            numtaps=self.fir_taps,
+            normalize=self.normalize,
+            clip=self.clip,
+        )
         return UlhmPoseModel(
             n_in_channels=n_spatial_locations,
             n_outputs=n_outputs,
@@ -63,6 +102,7 @@ class UlhmPose(BaseBrainModelConfig):
             recon_s_weight=self.recon_s_weight,
             consistency_weight=self.consistency_weight,
             consistency=self.consistency,
+            frontend=frontend,
         )
 
 
@@ -75,16 +115,24 @@ def _block(c_in: int, c_out: int, kernel: int, stride: int, dropout: float) -> n
     )
 
 
-def _encoder(c_in: int, hidden: int, latent: int, dropout: float) -> nn.Module:
-    """(B, c_in, T) -> (B, latent, T / 40). Same strides for both modalities."""
-    return nn.Sequential(
-        nn.BatchNorm1d(c_in),
+def _encoder(c_in: int, hidden: int, latent: int, dropout: float,
+             input_norm: bool = True) -> nn.Module:
+    """(B, c_in, T) -> (B, latent, T / 40). Same strides for both modalities.
+
+    ``input_norm`` adds a BatchNorm1d on the raw input. It is kept for the pose
+    branch (training only) and dropped for the EMG branch, whose input is
+    already standardized per window by the front end — BatchNorm there would
+    re-introduce training-user statistics at test time.
+    """
+    layers: list[nn.Module] = [nn.BatchNorm1d(c_in)] if input_norm else []
+    layers += [
         _block(c_in, hidden, 11, 5, dropout),
         _block(hidden, hidden, 9, 4, dropout),
         _block(hidden, hidden, 9, 2, dropout),
         _block(hidden, hidden, 9, 1, dropout),
         nn.Conv1d(hidden, latent, kernel_size=1),
-    )
+    ]
+    return nn.Sequential(*layers)
 
 
 class UlhmPoseModel(nn.Module):
@@ -100,9 +148,13 @@ class UlhmPoseModel(nn.Module):
         recon_s_weight: float = 1.0,
         consistency_weight: float = 0.1,
         consistency: str = "mse",
+        frontend: nn.Module | None = None,
     ):
         super().__init__()
-        self.encoder_x = _encoder(n_in_channels, hidden, latent, dropout)  # EMG
+        # parameter-free preprocessing applied to every EMG window, train and test
+        self.frontend = frontend if frontend is not None else EmgFrontEnd(n_in_channels)
+        self.encoder_x = _encoder(n_in_channels, hidden, latent, dropout,
+                                  input_norm=False)  # EMG: front end already normalizes
         self.encoder_s = _encoder(n_outputs, hidden, latent, dropout)  # pose
         self.decoder = nn.Sequential(  # shared: latent -> pose at 50 Hz
             _block(latent, hidden, 9, 1, dropout),
@@ -120,6 +172,7 @@ class UlhmPoseModel(nn.Module):
 
     def forward(self, x):
         """EMG ``(B, C, T)`` -> joint angles ``(B, T, n_outputs)`` (time-major)."""
+        x = self.frontend(x)  # filter + per-window normalize, no parameters
         z_x = self.encoder_x(x)
         self._z_x = z_x  # kept for auxiliary_losses; overwritten every call
         return self._decode(z_x, x.shape[-1]).transpose(1, 2)
