@@ -1,0 +1,36 @@
+# Hybrid spatial 2-D CNN + TCN for emg2pose.
+#   neuralbench emg pose -m st_tcn_pose --debug
+brain_model_config:
+  =replace=: true
+  name: "StTcnPose"
+  # --- spatial 2-D CNN (defaults shown; delete lines you don't change) ---
+  f1: 16
+  k_e: 65
+  spatial_mode: "conv2d"      # "conv2d" = ring convs over electrodes, "depthwise" = EEGNet only
+  spatial_layers: 2
+  k_s: 9
+  depth_mult: 2
+  f2: 64
+  k_sep: 16
+  pool1: 5                    # 2000 -> 400 Hz
+  pool2: 8                    # 400 -> 50 Hz
+  spatial_dropout: 0.2
+  # --- TCN ---
+  tcn_modules: 2
+  tcn_blocks: 3
+  tcn_filters: 64
+  tcn_kernel: 4
+  tcn_residual: true
+  tcn_causal: false
+  tcn_dropout: 0.2
+  # --- front end (EmgFrontEnd; same keys as ulhm_pose.yaml) ---
+  sfreq: 2000.0
+  highpass: 20.0
+  lowpass: 450.0               # e.g. 450.0 for a band-pass
+  notch: 60.0                  # e.g. 60.0 to remove mains + harmonics
+  notch_width: 6.0
+  fir_taps: 2001
+  normalize: true
+  clip: null
+
+delete_checkpoints_on_exit: false
