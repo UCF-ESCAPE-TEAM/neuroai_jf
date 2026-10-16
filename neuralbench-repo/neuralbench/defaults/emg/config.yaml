@@ -10,8 +10,8 @@ data:
     picks: [emg]
     # raw 2 kHz EMG, as in the emg2qwerty / emg2pose papers: the models normalize per window
     frequency: 2000.0
-    filter: [20, 500]
-    notch_filter: [60.0]
+    filter: null
+    notch_filter: null
     baseline: null
     scaler: null
     clamp: null

@@ -43,8 +43,8 @@ data:
     name: EmgExtractor
     picks: [misc]
     frequency: 2000.0
-    filter: [20, 500]
-    notch_filter: [60.0]
+    filter: null
+    notch_filter: null
     baseline: null
     scaler: null
     # Radians, as emg2pose trains and logs them; its Table 4 degrees are a
