@@ -1,0 +1,33 @@
+brain_model_config:
+  =replace=: true
+  name: "NeuralDrivePose"
+  sample_rate: 2000
+  # [1] neural-drive decoder: Negro-style front-end + unrolled BSS
+  band_low_hz: 20.0
+  band_high_hz: 500.0
+  filter_taps: 201
+  learnable_filter: false
+  n_delays: 32          # Negro: ~1000 / n_channels = 64 for 16 ch; 32 = 16 ms
+  n_sources: 32
+  threshold_init: 2.0
+  ica_weight: 0.1
+  decorr_weight: 0.1
+  sparsity_weight: 0.01
+  freeze_drive: false   # true after pretraining stage [1] on unlabeled EMG
+  # [2] drive feature extractor: per-source twitch filter + cross-source CNN
+  twitch_ms: 100.0
+  rate_stride_ms: 20.0  # -> 50 Hz
+  feature_hidden: 128
+  feature_depth: 2
+  feature_kernel: 9
+  # [3] kinematics decoder
+  decoder_kind: conv    # conv | gru
+  decoder_hidden: 128
+  decoder_depth: 2
+  decoder_kernel: 9
+  dropout: 0.1
+  # training-time augmentation
+  augment: true
+  gain_jitter: 0.3
+
+delete_checkpoints_on_exit: false

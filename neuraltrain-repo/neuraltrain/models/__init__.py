@@ -35,3 +35,4 @@ from . import cnn1d_pose as _cnn1d_pose  # noqa: F401
 from . import ulhm_pose as _ulhm_pose  # noqa: F401 
 
 from . import st_tcn_pose as _StTcnPoseModel  # noqa: F401
+from . import neuraldrive_pose as _NeuralDrivePose
