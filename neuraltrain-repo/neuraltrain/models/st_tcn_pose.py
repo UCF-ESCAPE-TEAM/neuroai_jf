@@ -125,10 +125,12 @@ class SpatialBlock(nn.Module):
             nn.BatchNorm2d(f1),
         )
         layers = []
+        # convolution along the EMG arm band.
         if spatial_mode == "conv2d":
             for _ in range(spatial_layers):
                 layers += [_RingConv2d(f1, 3, k_s), nn.BatchNorm2d(f1), nn.ELU()]
         self.spatial2d = nn.Sequential(*layers)
+        
         # depthwise (C, 1): one spatial filter per feature map (x depth_mult), as in EEGNet
         self.collapse = nn.Sequential(
             nn.Conv2d(f1, f1 * depth_mult, (n_ch, 1), groups=f1, bias=False),
@@ -241,6 +243,7 @@ class StTcnPoseModel(nn.Module):
         super().__init__()
         # parameter-free preprocessing applied to every EMG window, train and test
         self.frontend = frontend if frontend is not None else EmgFrontEnd(n_in_channels, sfreq=sfreq)
+        # may be i can remove the temporal block from this SpatilBlock
         self.spatial = SpatialBlock(
             n_in_channels, f1, k_e, spatial_mode, spatial_layers, k_s, depth_mult,
             f2, k_sep, pool1, pool2, spatial_dropout,
@@ -251,6 +254,7 @@ class StTcnPoseModel(nn.Module):
                                      tcn_dropout, tcn_residual, tcn_causal))
             c_in = tcn_filters
         self.tcn = nn.Sequential(*modules)
+        # Used all convolutional layer to decode temporal and spatial features into joint angles
         self.head = nn.Conv1d(tcn_filters, n_outputs, 1)
 
         # bookkeeping for the docstring / logs

@@ -101,6 +101,7 @@ class EmgFrontEnd(nn.Module):
         return y.to(x.dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, C, T) -> (B, C, T)
+        # Run filtering and normalization during the forward pass
         if self.kernel is not None:
             x = self._filter(x)
         if self.normalize:
