@@ -1,36 +1,44 @@
-# Hybrid spatial 2-D CNN + TCN for emg2pose.
-#   neuralbench emg pose -m st_tcn_pose --debug
 brain_model_config:
   =replace=: true
   name: "StTcnPose"
-  # --- spatial 2-D CNN (defaults shown; delete lines you don't change) ---
-  f1: 16
+  # ---- front end (EmgFrontEnd, no parameters) ----
+  # Disabled by default: the model reads the raw µV the challenge serves, like
+  # VEMG2Pose. Set highpass/lowpass/notch (Hz) to add a FIR, normalize: true
+  # for a per-channel z-score.
+  sfreq: 2000.0         # training sampling rate; fixes the FIR design if any
+  highpass: null        # e.g. 20.0
+  lowpass: null         # e.g. 450.0
+  notch: null           # e.g. 60.0 (mains + harmonics)
+  notch_width: 6.0
+  fir_taps: 2001        # only used when a filter edge is set. 1.0 s kernel;
+                        # causal: also the group delay (0.5 s) -> use 401.
+  normalize: false      # true: z-score per channel (window-level, or
+                        # expanding-window when causal)
+  clip: null            # clamp |x| (in SD units when normalized)
+  # ---- spatial 2-D CNN (EEGNet-style over the 16-electrode ring) ----
+  f1: 16                # temporal filters (65-tap FIR bank)
   k_e: 65
-  spatial_mode: "conv2d"      # "conv2d" = ring convs over electrodes, "depthwise" = EEGNet only
+  spatial_mode: conv2d  # conv2d | none   (ring convs between temporal and spatial filter)
   spatial_layers: 2
   k_s: 9
-  depth_mult: 2
+  depth_mult: 2         # spatial filters per temporal map
   f2: 64
   k_sep: 16
-  pool1: 5                    # 2000 -> 400 Hz
-  pool2: 8                    # 400 -> 50 Hz
+  pool1: 5              # 2000 Hz -> 400 Hz
+  pool2: 8              # 400 Hz -> 50 Hz feature rate
   spatial_dropout: 0.2
-  # --- TCN ---
+  # ---- TCN (EEG-TCNet residual dilated blocks at 50 Hz) ----
   tcn_modules: 2
-  tcn_blocks: 3
+  tcn_blocks: 3         # dilations 1, 2, 4 -> RF 43 steps / module, 85 total (1.7 s)
   tcn_filters: 64
   tcn_kernel: 4
   tcn_residual: true
-  tcn_causal: false
   tcn_dropout: 0.2
-  # --- front end (EmgFrontEnd; same keys as ulhm_pose.yaml) ---
-  sfreq: 2000.0
-  highpass: 20.0
-  lowpass: 450.0               # e.g. 450.0 for a band-pass
-  notch: 60.0                  # e.g. 60.0 to remove mains + harmonics
-  notch_width: 6.0
-  fir_taps: 2001
-  normalize: true
-  clip: null
-
+  # ---- causality ----
+  # false: offline / bidirectional (centred convs, window z-score, linear
+  #        upsampling) -- what the competition allows and scores best.
+  # true:  online-capable (left-padded convs, expanding-window z-score,
+  #        forward-only TCN, zero-order-hold upsampling); output at t uses
+  #        x[..t] only. Checkpoints load across both settings.
+  causal: false
 delete_checkpoints_on_exit: false

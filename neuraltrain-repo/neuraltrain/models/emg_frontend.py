@@ -1,11 +1,10 @@
-"""Parameter-free EMG front end: band-pass + notch (FIR) and per-window normalization.
+"""Parameter-free EMG conditioning: FIR band-pass / notch + standardisation.
 
-Lives inside the model so training, ``check_model`` and the Codabench harness all
-see identical inputs. All filtering is one depthwise ``conv1d`` with a symmetric
-(linear-phase) FIR kernel designed once with scipy at construction time, so the
-output has no group delay and nothing here is trained or stateful.
-
-Input / output: ``(B, C, T)`` float, same shape.
+Non-causal (default): zero-phase centred FIR and per-window z-score, as in
+offline processing (``filtfilt``-style).  Causal: the same FIR applied with
+left-only padding (output at ``t`` uses ``x[t-K+1 .. t]``) and an
+expanding-window z-score (running mean / SD up to ``t``), so nothing in the
+output depends on samples after ``t``.
 """
 
 import numpy as np
@@ -42,7 +41,7 @@ def _design_fir(sfreq: float, highpass: float | None, lowpass: float | None,
 
 
 class EmgFrontEnd(nn.Module):
-    """Band-pass / notch filter and per-window, per-channel standardization.
+    """Band-pass / notch filter and per-channel standardization.
 
     Parameters
     ----------
@@ -61,19 +60,27 @@ class EmgFrontEnd(nn.Module):
         FIR length (odd). 2001 taps at 2 kHz = 1.0 s kernel, transition ~ 4 Hz;
         use 801 for a cheaper filter when no notch is needed.
     normalize : bool
-        Per-window, per-channel zero mean / unit SD (what InstanceNorm1d does).
+        Zero mean / unit SD per channel: over the whole window (non-causal) or
+        over the samples seen so far (causal).
     clip : float or None
         Clamp |x| after normalization (in SD units) to guard against spikes.
+    causal : bool
+        Left-only FIR padding and expanding-window statistics. The symmetric
+        FIR then has a group delay of ``(numtaps - 1) / 2`` samples (0.5 s for
+        2001 taps at 2 kHz); use fewer taps (e.g. 401 -> 0.1 s) for a causal
+        model.
     """
 
     def __init__(self, n_channels: int = 16, sfreq: float = 2000.0,
                  highpass: float | None = 20.0, lowpass: float | None = None,
                  notch: float | None = None, notch_width: float = 6.0,
-                 numtaps: int = 2001, normalize: bool = True, clip: float | None = 20.0):
+                 numtaps: int = 2001, normalize: bool = True, clip: float | None = 20.0,
+                 causal: bool = False):
         super().__init__()
         self.n_channels = n_channels
         self.normalize = normalize
         self.clip = clip
+        self.causal = causal
         h = _design_fir(sfreq, highpass, lowpass, notch, notch_width, numtaps)
         if h is None:
             self.kernel = None
@@ -83,31 +90,45 @@ class EmgFrontEnd(nn.Module):
             self.register_buffer("kernel", torch.from_numpy(h), persistent=False)
 
     def _filter(self, x: torch.Tensor) -> torch.Tensor:
-        """Zero-delay 'same' convolution with the symmetric FIR, via FFT.
+        """'Same'-length convolution with the FIR, via FFT.
 
-        FFT convolution is O(T log T) regardless of kernel length; a direct
+        Centred (zero delay) when non-causal, left-aligned when causal. FFT
+        convolution is O(T log T) regardless of kernel length; a direct
         depthwise conv1d with a 2001-tap kernel is ~50x slower on CPU.
         """
         k = self.kernel.shape[-1]
-        pad = k // 2
-        mode = "reflect" if x.shape[-1] > pad else "replicate"
-        xp = F.pad(x, (pad, pad), mode=mode)  # reflect pad: no edge transient
+        T = x.shape[-1]
+        left, right = (k - 1, 0) if self.causal else (k // 2, k // 2)
+        mode = "reflect" if T > max(left, right) else "replicate"
+        xp = F.pad(x, (left, right), mode=mode)  # reflect pad: no edge transient
         n = xp.shape[-1] + k - 1
         X = torch.fft.rfft(xp.float(), n=n)
         H = torch.fft.rfft(self.kernel.float(), n=n)
         y = torch.fft.irfft(X * H, n=n)
-        # full convolution -> keep the central T samples (linear phase => no delay)
-        y = y[..., k - 1: k - 1 + x.shape[-1]]
+        # full convolution -> output j uses xp[j .. j+k-1]; with the padding
+        # above that is x[j-k//2 .. j+k//2] (centred) or x[j-k+1 .. j] (causal)
+        y = y[..., k - 1: k - 1 + T]
+        return y.to(x.dtype)
+
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.causal:
+            mean = x.mean(dim=-1, keepdim=True)
+            std = x.std(dim=-1, keepdim=True, unbiased=False)
+            return (x - mean) / (std + 1e-5)
+        # expanding-window statistics: mean / SD of x[.. t] at every t
+        # (float64 cumsums: sums of squares over 10^4 samples exceed float32)
+        xd = x.double()
+        n = torch.arange(1, x.shape[-1] + 1, device=x.device, dtype=torch.float64)
+        mean = xd.cumsum(-1) / n
+        var = (xd * xd).cumsum(-1) / n - mean * mean
+        y = (xd - mean) / (var.clamp_min(0).sqrt() + 1e-5)
         return y.to(x.dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, C, T) -> (B, C, T)
-        # Run filtering and normalization during the forward pass
         if self.kernel is not None:
             x = self._filter(x)
         if self.normalize:
-            mean = x.mean(dim=-1, keepdim=True)
-            std = x.std(dim=-1, keepdim=True, unbiased=False)
-            x = (x - mean) / (std + 1e-5)
+            x = self._normalize(x)
         if self.clip is not None:
             x = x.clamp(-self.clip, self.clip)
         return x

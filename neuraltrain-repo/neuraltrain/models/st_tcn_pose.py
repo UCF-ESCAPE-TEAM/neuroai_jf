@@ -1,26 +1,20 @@
-"""Hybrid spatial-2D-CNN + TCN model for dense EMG -> joint-angle regression.
+"""Spatial-CNN + TCN EMG-to-pose model (StTcnPose).
 
-Pipeline (input ``(B, C=16, T)`` at 2 kHz, output ``(B, T, 20)`` radians)::
+    EMG (B, C, T) --> EmgFrontEnd (no params) --> SpatialBlock (EEGNet-style 2-D
+    CNN over the electrode ring, pools to ~50 Hz) --> TCN (EEG-TCNet residual
+    dilated blocks) --> 1x1 head --> upsample --> joint angles (B, T, n_outputs)
 
-    EmgFrontEnd              band-pass / notch / per-channel z-score (fixed, no params)
-    SpatialBlock (2-D CNN)   learn spatial patterns across the 16 electrodes
-        temporal Conv2d (1, k_e)         F1 "frequency" filters           (B, F1, C, T)
-        [conv2d mode]  n x Conv2d (3, k_s) with circular padding along C  (B, F1, C, T)
-                       -> electrodes form a ring around the wrist, so ch15 neighbours ch0
-        depthwise Conv2d (C, 1)          collapse the channel axis, D maps per filter
-                                                                          (B, F1*D, 1, T)
-        AvgPool (1, p1) -> separable conv (1, k_sep) -> AvgPool (1, p2)   (B, F2, T/(p1*p2))
-    TemporalBlock (TCN)      EEG-TCNet residual blocks (Ingolfsson et al. 2020)
-        n_modules x n_blocks x [dilated conv - BN - ELU - drop] x 2, dilation 2**i
-        residual connection optional; causal or centred padding
-    Head                     1x1 conv -> n_outputs, linear upsample to T
+``causal`` switches the whole model between
 
-The TCN follows EEG-TCNet's residual block (BN instead of weight norm, ELU,
-ordinary dropout). Differences for this task: several TCN modules can be
-stacked (each restarts the dilation schedule at 1), the residual is a switch,
-padding can be centred instead of causal (offline windows: the model may use
-the whole 5-s window), and the read-out is a per-frame regression rather than
-the last frame.
+* **non-causal** (default, offline): zero-phase front end, centred "same"
+  convolutions, window-level z-score, linear upsampling. Every output sample
+  may use the whole window; this is what the competition allows.
+* **causal** (online): left-only padding everywhere, expanding-window z-score,
+  forward-only TCN, zero-order-hold upsampling from the last *completed*
+  feature frame. The output at sample ``t`` depends on ``x[.. t]`` only
+  (except the first ``pool1 * pool2`` samples of a window, which use frame 0).
+
+Both variants share module names, so checkpoints load across them.
 """
 
 import typing as tp
@@ -33,84 +27,89 @@ from .base import BaseBrainModelConfig
 from .emg_frontend import EmgFrontEnd
 
 
-# =============================================================================
-# Config (NeuralBench entry point)
-# =============================================================================
 class StTcnPose(BaseBrainModelConfig):
-    """Config for :class:`StTcnPoseModel`. All fields can be set in the YAML."""
+    """Config for :class:`StTcnPoseModel`.
 
-    # --- spatial 2-D CNN ---------------------------------------------------
-    f1: int = 16                 # temporal filters of the first Conv2d
-    k_e: int = 65                # its kernel length (samples); 65 @ 2 kHz = 32 ms
-    spatial_mode: tp.Literal["depthwise", "conv2d"] = "conv2d"
-    spatial_layers: int = 2      # conv2d mode: number of (3, k_s) layers over the channel ring
-    k_s: int = 9                 # conv2d mode: temporal extent of those spatial kernels
-    depth_mult: int = 2          # D: spatial maps per temporal filter in the collapsing conv
-    f2: int = 64                 # filters after the separable conv
-    k_sep: int = 16              # separable conv kernel (at rate sfreq / pool1)
-    pool1: int = 5               # 2000 -> 400 Hz
-    pool2: int = 8               # 400  -> 50 Hz
-    spatial_dropout: float = 0.2
-    # --- TCN --------------------------------------------------------------
-    tcn_modules: int = 2         # how many TCN modules to stack
-    tcn_blocks: int = 3          # residual blocks per module (dilations 1, 2, 4, ...)
-    tcn_filters: int = 64        # F_T
-    tcn_kernel: int = 4          # K_T
-    tcn_residual: bool = True    # the optional skip connection
-    tcn_causal: bool = False     # True = EEG-TCNet causal padding; False = centred
-    tcn_dropout: float = 0.2
-    # --- front end (EmgFrontEnd; same fields as UlhmPose / Cnn1dPose) -------------
+    Front-end fields mirror :class:`EmgFrontEnd`; ``sfreq`` is the training
+    sampling rate and fixes the FIR design. Model fields are listed in
+    :attr:`StTcnPoseModel.MODEL_FIELDS`.
+    """
+
+    # front end (EmgFrontEnd); filtering and normalisation are off by default
     sfreq: float = 2000.0
-    highpass: float | None = 20.0
+    highpass: float | None = None
     lowpass: float | None = None
     notch: float | None = None
     notch_width: float = 6.0
     fir_taps: int = 2001
-    normalize: bool = True
-    clip: float | None = 20.0
-
-    _FRONTEND_FIELDS = ("sfreq", "highpass", "lowpass", "notch", "notch_width",
-                        "fir_taps", "normalize", "clip")
+    normalize: bool = False
+    clip: float | None = None
+    # spatial 2-D CNN
+    f1: int = 16
+    k_e: int = 65
+    spatial_mode: tp.Literal["conv2d", "none"] = "conv2d"
+    spatial_layers: int = 2
+    k_s: int = 9
+    depth_mult: int = 2
+    f2: int = 64
+    k_sep: int = 16
+    pool1: int = 5
+    pool2: int = 8
+    spatial_dropout: float = 0.2
+    # TCN
+    tcn_modules: int = 2
+    tcn_blocks: int = 3
+    tcn_filters: int = 64
+    tcn_kernel: int = 4
+    tcn_residual: bool = True
+    tcn_dropout: float = 0.2
+    # causality of the whole model (front end, spatial block, TCN, upsampling)
+    causal: bool = False
 
     def build(self, n_spatial_locations: int, n_outputs: int | None) -> nn.Module:
         assert n_outputs is not None, "StTcnPose requires n_outputs"
         frontend = EmgFrontEnd(
-            n_channels=n_spatial_locations,
-            sfreq=self.sfreq,
-            highpass=self.highpass,
-            lowpass=self.lowpass,
-            notch=self.notch,
-            notch_width=self.notch_width,
-            numtaps=self.fir_taps,
-            normalize=self.normalize,
-            clip=self.clip,
+            n_channels=n_spatial_locations, sfreq=self.sfreq, highpass=self.highpass,
+            lowpass=self.lowpass, notch=self.notch, notch_width=self.notch_width,
+            numtaps=self.fir_taps, normalize=self.normalize, clip=self.clip,
+            causal=self.causal,
         )
-        model_kwargs = {
-            k: getattr(self, k)
-            for k in StTcnPoseModel.MODEL_FIELDS
-        }
-        return StTcnPoseModel(
-            n_in_channels=n_spatial_locations,
-            n_outputs=n_outputs,
-            sfreq=self.sfreq,
-            frontend=frontend,
-            **model_kwargs,
-        )
+        model_kwargs = {k: getattr(self, k) for k in StTcnPoseModel.MODEL_FIELDS}
+        return StTcnPoseModel(n_in_channels=n_spatial_locations, n_outputs=n_outputs,
+                              sfreq=self.sfreq, frontend=frontend, **model_kwargs)
+
+
+# =============================================================================
+# padding helpers
+# =============================================================================
+def _same_pad(k: int, causal: bool) -> tuple[int, int]:
+    """(left, right) zero padding so a stride-1 conv of kernel ``k`` keeps length.
+
+    Non-causal: centred (``k // 2`` each side for odd ``k``; for even ``k`` the
+    extra sample goes left, matching PyTorch's symmetric ``padding=k//2`` on
+    the kept samples). Causal: all ``k - 1`` on the left.
+    """
+    if causal:
+        return k - 1, 0
+    left = k // 2
+    return left, k - 1 - left
 
 
 # =============================================================================
 # Spatial block: 2-D CNN over (channels x time)
 # =============================================================================
 class _RingConv2d(nn.Module):
-    """Conv2d over (C, T) with circular padding along C and zero padding along T."""
+    """Conv2d over (C, T) with circular padding along C and 'same' padding along T."""
 
-    def __init__(self, ch: int, k_c: int, k_t: int):
+    def __init__(self, ch: int, k_c: int, k_t: int, causal: bool):
         super().__init__()
         self.pad_c = k_c // 2
-        self.conv = nn.Conv2d(ch, ch, (k_c, k_t), padding=(0, k_t // 2), bias=False)
+        self.pad_t = _same_pad(k_t, causal)
+        self.conv = nn.Conv2d(ch, ch, (k_c, k_t), padding=0, bias=False)
 
     def forward(self, x):                                   # (B, F, C, T)
-        x = F.pad(x, (0, 0, self.pad_c, self.pad_c), mode="circular")
+        x = F.pad(x, (0, 0, self.pad_c, self.pad_c), mode="circular")  # electrode ring
+        x = F.pad(x, (*self.pad_t, 0, 0))                                # time (zeros)
         return self.conv(x)
 
 
@@ -118,29 +117,29 @@ class SpatialBlock(nn.Module):
     """EEGNet-style front end, optionally with 2-D spatial convs over the electrode ring."""
 
     def __init__(self, n_ch, f1, k_e, spatial_mode, spatial_layers, k_s, depth_mult,
-                 f2, k_sep, pool1, pool2, dropout):
+                 f2, k_sep, pool1, pool2, dropout, causal):
         super().__init__()
+        self.pad_e = _same_pad(k_e, causal)
+        self.pad_sep = _same_pad(k_sep, causal)
         self.temporal = nn.Sequential(
-            nn.Conv2d(1, f1, (1, k_e), padding=(0, k_e // 2), bias=False),
+            nn.Conv2d(1, f1, (1, k_e), padding=0, bias=False),
             nn.BatchNorm2d(f1),
         )
         layers = []
-        # convolution along the EMG arm band.
         if spatial_mode == "conv2d":
             for _ in range(spatial_layers):
-                layers += [_RingConv2d(f1, 3, k_s), nn.BatchNorm2d(f1), nn.ELU()]
+                layers += [_RingConv2d(f1, 3, k_s, causal), nn.BatchNorm2d(f1), nn.ELU()]
         self.spatial2d = nn.Sequential(*layers)
-        
         # depthwise (C, 1): one spatial filter per feature map (x depth_mult), as in EEGNet
         self.collapse = nn.Sequential(
             nn.Conv2d(f1, f1 * depth_mult, (n_ch, 1), groups=f1, bias=False),
             nn.BatchNorm2d(f1 * depth_mult),
             nn.ELU(),
-            nn.AvgPool2d((1, pool1)),
+            nn.AvgPool2d((1, pool1)),   # bin j = samples [j*p, (j+1)*p): end-aligned, causal
             nn.Dropout(dropout),
         )
         self.separable = nn.Sequential(
-            nn.Conv2d(f1 * depth_mult, f1 * depth_mult, (1, k_sep), padding=(0, k_sep // 2),
+            nn.Conv2d(f1 * depth_mult, f1 * depth_mult, (1, k_sep), padding=0,
                       groups=f1 * depth_mult, bias=False),
             nn.Conv2d(f1 * depth_mult, f2, 1, bias=False),
             nn.BatchNorm2d(f2),
@@ -152,9 +151,11 @@ class SpatialBlock(nn.Module):
         self.downsample = pool1 * pool2
 
     def forward(self, x):                      # (B, C, T)
-        x = self.temporal(x.unsqueeze(1))      # (B, F1, C, T)
+        x = F.pad(x.unsqueeze(1), (*self.pad_e, 0, 0))   # (B, 1, C, T + k_e - 1)
+        x = self.temporal(x)                   # (B, F1, C, T)
         x = self.spatial2d(x)                  # (B, F1, C, T)
         x = self.collapse(x)                   # (B, F1*D, 1, T/p1)
+        x = F.pad(x, (*self.pad_sep, 0, 0))
         x = self.separable(x)                  # (B, F2, 1, T/(p1*p2))
         return x.squeeze(2)                    # (B, F2, T')
 
@@ -223,7 +224,7 @@ class StTcnPoseModel(nn.Module):
         "f1", "k_e", "spatial_mode", "spatial_layers", "k_s", "depth_mult",
         "f2", "k_sep", "pool1", "pool2", "spatial_dropout",
         "tcn_modules", "tcn_blocks", "tcn_filters", "tcn_kernel",
-        "tcn_residual", "tcn_causal", "tcn_dropout",
+        "tcn_residual", "tcn_dropout", "causal",
     )
 
     def __init__(
@@ -236,25 +237,27 @@ class StTcnPoseModel(nn.Module):
         f2=64, k_sep=16, pool1=5, pool2=8, spatial_dropout=0.2,
         # tcn
         tcn_modules=2, tcn_blocks=3, tcn_filters=64, tcn_kernel=4,
-        tcn_residual=True, tcn_causal=False, tcn_dropout=0.2,
+        tcn_residual=True, tcn_dropout=0.2,
+        # causality
+        causal: bool = False,
         # preprocessing
         frontend: nn.Module | None = None,
     ):
         super().__init__()
+        self.causal = causal
         # parameter-free preprocessing applied to every EMG window, train and test
-        self.frontend = frontend if frontend is not None else EmgFrontEnd(n_in_channels, sfreq=sfreq)
-        # may be i can remove the temporal block from this SpatilBlock
+        self.frontend = frontend if frontend is not None else EmgFrontEnd(
+            n_in_channels, sfreq=sfreq, causal=causal)
         self.spatial = SpatialBlock(
             n_in_channels, f1, k_e, spatial_mode, spatial_layers, k_s, depth_mult,
-            f2, k_sep, pool1, pool2, spatial_dropout,
+            f2, k_sep, pool1, pool2, spatial_dropout, causal,
         )
         modules, c_in = [], self.spatial.out_channels
         for _ in range(tcn_modules):
             modules.append(TcnModule(c_in, tcn_filters, tcn_kernel, tcn_blocks,
-                                     tcn_dropout, tcn_residual, tcn_causal))
+                                     tcn_dropout, tcn_residual, causal))
             c_in = tcn_filters
         self.tcn = nn.Sequential(*modules)
-        # Used all convolutional layer to decode temporal and spatial features into joint angles
         self.head = nn.Conv1d(tcn_filters, n_outputs, 1)
 
         # bookkeeping for the docstring / logs
@@ -263,6 +266,19 @@ class StTcnPoseModel(nn.Module):
             sum(m.receptive_field - 1 for m in modules) + 1
         ) / self.feature_rate
 
+    def _upsample(self, y: torch.Tensor, n_samples: int) -> torch.Tensor:
+        """(B, J, T') at the feature rate -> (B, J, T) at the input rate."""
+        if not self.causal:
+            return F.interpolate(y, size=n_samples, mode="linear", align_corners=False)
+        # Zero-order hold from the last completed frame. Frame j summarises
+        # samples [j*P, (j+1)*P) and is complete at sample (j+1)*P - 1, so
+        # sample t may use frame (t+1)//P - 1; samples before the first
+        # completed frame fall back to frame 0.
+        P = self.spatial.downsample
+        t = torch.arange(n_samples, device=y.device)
+        idx = ((t + 1) // P - 1).clamp_(0, y.shape[-1] - 1)
+        return y[..., idx]
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """EMG ``(B, C, T)`` -> joint angles ``(B, T, n_outputs)``."""
         n_samples = x.shape[-1]
@@ -270,5 +286,5 @@ class StTcnPoseModel(nn.Module):
         z = self.spatial(x)             # (B, F2, T')  spatial features at ~50 Hz
         z = self.tcn(z)                 # (B, F_T, T') temporal context
         y = self.head(z)                # (B, n_outputs, T')
-        y = F.interpolate(y, size=n_samples, mode="linear", align_corners=False)
+        y = self._upsample(y, n_samples)
         return y.transpose(1, 2)        # (B, T, n_outputs)
