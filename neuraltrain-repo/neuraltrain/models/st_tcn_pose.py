@@ -63,7 +63,12 @@ class StTcnPose(BaseBrainModelConfig):
     tcn_kernel: int = 4
     tcn_residual: bool = True
     tcn_dropout: float = 0.2
-    # causality of the whole model (front end, spatial block, TCN, upsampling)
+    # output head (see PoseHead)
+    head_kind: tp.Literal["linear", "smooth", "velocity"] = "linear"
+    head_smooth_k: int = 5
+    head_position_steps: int = 12
+    head_vel_scale: float = 0.02
+    # causality of the whole model (front end, spatial block, TCN, head, upsampling)
     causal: bool = False
 
     def build(self, n_spatial_locations: int, n_outputs: int | None) -> nn.Module:
@@ -216,6 +221,59 @@ class TcnModule(nn.Module):
 
 
 # =============================================================================
+# Output head
+# =============================================================================
+class PoseHead(nn.Module):
+    """TCN features ``(B, F, T')`` -> joint angles ``(B, J, T')`` at the feature rate.
+
+    kind="linear"   : 1x1 conv readout, one pose per frame, no continuity prior
+                      (state-dict compatible with the original ``head`` conv).
+    kind="smooth"   : the same readout followed by a learnable depthwise
+                      ``smooth_k``-tap filter per joint, initialised to a moving
+                      average (centred, or left-aligned when causal).
+    kind="velocity" : the readout emits a position AND a velocity per joint
+                      (2J channels). The pose is the position for the first
+                      ``position_steps`` frames and from there on the previous
+                      pose plus ``vel_scale`` x velocity -- VEMG2Pose's hybrid
+                      parameterisation, without the LSTM. Integration is a
+                      cumulative sum, so it is causal by construction.
+    """
+
+    def __init__(self, c_in: int, n_outputs: int, kind: str = "linear",
+                 smooth_k: int = 5, position_steps: int = 12, vel_scale: float = 0.02,
+                 causal: bool = False):
+        super().__init__()
+        if kind not in ("linear", "smooth", "velocity"):
+            raise ValueError(f"head_kind must be linear | smooth | velocity, got {kind!r}")
+        self.kind = kind
+        self.n_outputs = n_outputs
+        self.position_steps = position_steps
+        self.vel_scale = vel_scale
+        n_out = 2 * n_outputs if kind == "velocity" else n_outputs
+        # named ``proj`` inside the head; StTcnPoseModel aliases it so that the
+        # original key ``head.weight`` keeps loading for kind="linear"
+        self.proj = nn.Conv1d(c_in, n_out, 1)
+        if kind == "smooth":
+            self.pad = _same_pad(smooth_k, causal)
+            self.smooth = nn.Conv1d(n_outputs, n_outputs, smooth_k, groups=n_outputs, bias=False)
+            with torch.no_grad():
+                self.smooth.weight.fill_(1.0 / smooth_k)   # moving average at init
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        y = self.proj(z)
+        if self.kind == "linear":
+            return y
+        if self.kind == "smooth":
+            return self.smooth(F.pad(y, self.pad))
+        pos, vel = y.chunk(2, dim=1)                       # (B, J, T') each
+        k = min(self.position_steps, pos.shape[-1])
+        if k == pos.shape[-1]:
+            return pos
+        integrated = pos[..., k - 1:k] + torch.cumsum(vel[..., k:] * self.vel_scale, dim=-1)
+        return torch.cat([pos[..., :k], integrated], dim=-1)
+
+
+# =============================================================================
 # Full model
 # =============================================================================
 class StTcnPoseModel(nn.Module):
@@ -224,7 +282,9 @@ class StTcnPoseModel(nn.Module):
         "f1", "k_e", "spatial_mode", "spatial_layers", "k_s", "depth_mult",
         "f2", "k_sep", "pool1", "pool2", "spatial_dropout",
         "tcn_modules", "tcn_blocks", "tcn_filters", "tcn_kernel",
-        "tcn_residual", "tcn_dropout", "causal",
+        "tcn_residual", "tcn_dropout",
+        "head_kind", "head_smooth_k", "head_position_steps", "head_vel_scale",
+        "causal",
     )
 
     def __init__(

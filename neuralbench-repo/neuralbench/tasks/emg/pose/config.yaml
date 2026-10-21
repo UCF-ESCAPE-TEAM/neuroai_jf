@@ -89,7 +89,7 @@ trainer_config:
   gradient_clip_val: 0
   # The Rich bar buffers its writes, leaving the log silent for a whole epoch;
   # per-epoch lines still land without it.
-  enable_progress_bar: false
+  enable_progress_bar: true
 # emg2pose holds the learning rate at 1e-3 (config/experiment/regression_*.yaml)
 # where the neuralbench default anneals a 10x smaller one through OneCycleLR.
 lightning_optimizer_config:

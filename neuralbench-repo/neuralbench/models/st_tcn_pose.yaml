@@ -6,34 +6,34 @@ brain_model_config:
   # VEMG2Pose. Set highpass/lowpass/notch (Hz) to add a FIR, normalize: true
   # for a per-channel z-score.
   sfreq: 2000.0         # training sampling rate; fixes the FIR design if any
-  highpass: null        # e.g. 20.0
-  lowpass: null         # e.g. 450.0
-  notch: null           # e.g. 60.0 (mains + harmonics)
+  highpass: 20.0        # e.g. 20.0
+  lowpass: 450.0         # e.g. 450.0
+  notch: 60.0           # e.g. 60.0 (mains + harmonics)
   notch_width: 6.0
   fir_taps: 2001        # only used when a filter edge is set. 1.0 s kernel;
                         # causal: also the group delay (0.5 s) -> use 401.
-  normalize: false      # true: z-score per channel (window-level, or
+  normalize: true      # true: z-score per channel (window-level, or
                         # expanding-window when causal)
   clip: null            # clamp |x| (in SD units when normalized)
   # ---- spatial 2-D CNN (EEGNet-style over the 16-electrode ring) ----
-  f1: 16                # temporal filters (65-tap FIR bank)
+  f1: 32                # temporal filters (65-tap FIR bank)
   k_e: 65
   spatial_mode: conv2d  # conv2d | none   (ring convs between temporal and spatial filter)
   spatial_layers: 2
   k_s: 9
   depth_mult: 2         # spatial filters per temporal map
-  f2: 64
+  f2: 128
   k_sep: 16
   pool1: 5              # 2000 Hz -> 400 Hz
   pool2: 8              # 400 Hz -> 50 Hz feature rate
-  spatial_dropout: 0.2
+  spatial_dropout: 0.1
   # ---- TCN (EEG-TCNet residual dilated blocks at 50 Hz) ----
   tcn_modules: 2
   tcn_blocks: 3         # dilations 1, 2, 4 -> RF 43 steps / module, 85 total (1.7 s)
-  tcn_filters: 64
+  tcn_filters: 128
   tcn_kernel: 4
   tcn_residual: true
-  tcn_dropout: 0.2
+  tcn_dropout: 0.1
   # ---- causality ----
   # false: offline / bidirectional (centred convs, window z-score, linear
   #        upsampling) -- what the competition allows and scores best.
