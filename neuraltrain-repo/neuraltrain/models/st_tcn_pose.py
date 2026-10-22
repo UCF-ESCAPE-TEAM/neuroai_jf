@@ -46,6 +46,15 @@ class StTcnPose(BaseBrainModelConfig):
     fir_taps: int = 2001
     normalize: bool = True
     clip: float | None = None
+    # per-window bad-channel rejection + ring interpolation (EmgFrontEnd)
+    reject_channels: bool = False
+    reject_rms_nstd: float = 3.0
+    reject_mains: float | None = 60.0
+    reject_mains_nstd: float = 3.0
+    reject_mains_bw: float = 2.0
+    reject_segment: int = 400
+    reject_max_frac: float = 0.5
+    reject_method: tp.Literal["std", "mad"] = "std"
     # spatial 2-D CNN
     f1: int = 16
     k_e: int = 65
@@ -80,6 +89,10 @@ class StTcnPose(BaseBrainModelConfig):
             lowpass=self.lowpass, notch=self.notch, notch_width=self.notch_width,
             numtaps=self.fir_taps, normalize=self.normalize, clip=self.clip,
             causal=self.causal,
+            reject_channels=self.reject_channels, reject_rms_nstd=self.reject_rms_nstd,
+            reject_mains=self.reject_mains, reject_mains_nstd=self.reject_mains_nstd,
+            reject_mains_bw=self.reject_mains_bw, reject_segment=self.reject_segment,
+            reject_max_frac=self.reject_max_frac, reject_method=self.reject_method,
         )
         model_kwargs = {k: getattr(self, k) for k in StTcnPoseModel.MODEL_FIELDS}
         return StTcnPoseModel(n_in_channels=n_spatial_locations, n_outputs=n_outputs,

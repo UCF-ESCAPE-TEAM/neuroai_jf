@@ -1,4 +1,5 @@
-"""Parameter-free EMG conditioning: FIR band-pass / notch + standardisation.
+"""Parameter-free EMG conditioning: bad-channel rejection + interpolation,
+FIR band-pass / notch, standardisation.
 
 Non-causal (default): zero-phase centred FIR and per-window z-score, as in
 offline processing (``filtfilt``-style).  Causal: the same FIR applied with
@@ -69,18 +70,63 @@ class EmgFrontEnd(nn.Module):
         FIR then has a group delay of ``(numtaps - 1) / 2`` samples (0.5 s for
         2001 taps at 2 kHz); use fewer taps (e.g. 401 -> 0.1 s) for a causal
         model.
+    reject_channels : bool
+        Per-window bad-channel rejection + ring interpolation, applied to the
+        raw signal before the FIR. A channel is bad when, within the window,
+        its RMS or its mains-band energy is an outlier across channels
+        (``mean + n * std``). Bad channels are replaced by the mean of their
+        two ring neighbours (circular, so channel 0 and C-1 are neighbours).
+    reject_rms_nstd : float
+        ``n`` for the RMS criterion.
+    reject_mains : float or None
+        Mains frequency for the power-line criterion (energy within
+        ``+-reject_mains_bw`` Hz of the fundamental and 2nd harmonic);
+        ``None`` disables that criterion.
+    reject_mains_nstd, reject_mains_bw : float
+        ``n`` and half-bandwidth (Hz) for the power-line criterion.
+    reject_segment : int
+        Causal mode only: the statistics are computed on the first
+        ``reject_segment`` samples of the window and the decision applied to
+        the whole window (so the first ``reject_segment`` samples are not
+        strictly causal). Non-causal mode uses the whole window.
+    reject_max_frac : float
+        Safety valve: if more than this fraction of channels is flagged in a
+        window, nothing is interpolated there (the statistics are then
+        unreliable, e.g. a window of pure noise).
+    reject_method : {"std", "mad"}
+        Outlier rule across channels: ``mean + n*std`` (original) or the robust
+        ``median + n*1.4826*MAD`` (recommended with 16 channels: it still flags
+        two simultaneously bad channels, which mask each other under "std").
     """
 
     def __init__(self, n_channels: int = 16, sfreq: float = 2000.0,
                  highpass: float | None = 20.0, lowpass: float | None = None,
                  notch: float | None = None, notch_width: float = 6.0,
                  numtaps: int = 2001, normalize: bool = True, clip: float | None = 20.0,
-                 causal: bool = False):
+                 causal: bool = False,
+                 reject_channels: bool = False, reject_rms_nstd: float = 3.0,
+                 reject_mains: float | None = 60.0, reject_mains_nstd: float = 3.0,
+                 reject_mains_bw: float = 2.0, reject_segment: int = 400,
+                 reject_max_frac: float = 0.5, reject_method: str = "std"):
         super().__init__()
         self.n_channels = n_channels
+        self.sfreq = float(sfreq)
         self.normalize = normalize
         self.clip = clip
         self.causal = causal
+        self.reject_channels = reject_channels
+        self.reject_rms_nstd = reject_rms_nstd
+        self.reject_mains = reject_mains
+        self.reject_mains_nstd = reject_mains_nstd
+        self.reject_mains_bw = reject_mains_bw
+        self.reject_segment = reject_segment
+        self.reject_max_frac = reject_max_frac
+        if reject_method not in ("std", "mad"):
+            raise ValueError(f"reject_method must be 'std' or 'mad', got {reject_method!r}")
+        self.reject_method = reject_method
+        # fraction of (window, channel) pairs interpolated in the last forward;
+        # for monitoring, not part of the state
+        self.last_reject_fraction: float = 0.0
         h = _design_fir(sfreq, highpass, lowpass, notch, notch_width, numtaps)
         if h is None:
             self.kernel = None
@@ -89,6 +135,62 @@ class EmgFrontEnd(nn.Module):
             # config at construction, so weights.pt stays architecture-only.
             self.register_buffer("kernel", torch.from_numpy(h), persistent=False)
 
+    # ------------------------------------------------------------ rejection
+    def _outliers(self, v: torch.Tensor, n: float) -> torch.Tensor:
+        """Outliers across channels, per window. (B, C) -> bool (B, C).
+
+        ``reject_method="std"``: ``v > mean + n * std`` (the original rule).
+        ``reject_method="mad"``: ``v > median + n * 1.4826 * MAD`` -- the robust
+        equivalent; with 16 channels two loud channels inflate the std enough
+        to hide each other from the "std" rule, the MAD rule still flags both.
+        """
+        if self.reject_method == "mad":
+            med = v.median(-1, keepdim=True).values
+            mad = (v - med).abs().median(-1, keepdim=True).values
+            return v > med + n * 1.4826 * mad
+        thr = v.mean(-1, keepdim=True) + n * v.std(-1, keepdim=True, unbiased=False)
+        return v > thr
+
+    def bad_channel_mask(self, x: torch.Tensor) -> torch.Tensor:
+        """Bool mask (B, C) of channels to interpolate in each window of ``x`` (B, C, T)."""
+        seg = x[..., : self.reject_segment] if self.causal else x
+        seg = seg.float()
+        rms = seg.pow(2).mean(-1).sqrt()                                 # (B, C)
+        bad = self._outliers(rms, self.reject_rms_nstd)
+        if self.reject_mains is not None:
+            spec = torch.fft.rfft(seg, dim=-1).abs()                     # (B, C, n_freq)
+            freqs = torch.fft.rfftfreq(seg.shape[-1], d=1.0 / self.sfreq).to(seg.device)
+            band = torch.zeros_like(freqs, dtype=torch.bool)
+            for harmonic in (1, 2):
+                f0 = self.reject_mains * harmonic
+                if f0 < self.sfreq / 2:
+                    band |= (freqs - f0).abs() <= self.reject_mains_bw
+            energy = spec[..., band].sum(-1)                             # (B, C)
+            bad |= self._outliers(energy, self.reject_mains_nstd)
+        # too many flagged channels -> statistics meaningless, leave the window alone
+        too_many = bad.float().mean(-1, keepdim=True) > self.reject_max_frac
+        return bad & ~too_many
+
+    @staticmethod
+    def _ring_interpolate(x: torch.Tensor, bad: torch.Tensor) -> torch.Tensor:
+        """Replace flagged channels by the mean of their two ring neighbours.
+
+        (B, C, T), bool (B, C) -> (B, C, T). Neighbours wrap around (the arm
+        band is a ring). Neighbour values are taken from the *input*, so two
+        adjacent bad channels each get a blend of one good and one bad
+        neighbour -- the same as applying the per-channel rule in one pass.
+        """
+        neighbours = (x.roll(1, dims=1) + x.roll(-1, dims=1)) / 2
+        return torch.where(bad.unsqueeze(-1), neighbours, x)
+
+    def _reject(self, x: torch.Tensor) -> torch.Tensor:
+        bad = self.bad_channel_mask(x)
+        self.last_reject_fraction = bad.float().mean().item()
+        if not bool(bad.any()):
+            return x
+        return self._ring_interpolate(x, bad)
+
+    # ------------------------------------------------------------- filtering
     def _filter(self, x: torch.Tensor) -> torch.Tensor:
         """'Same'-length convolution with the FIR, via FFT.
 
@@ -125,6 +227,8 @@ class EmgFrontEnd(nn.Module):
         return y.to(x.dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, C, T) -> (B, C, T)
+        if self.reject_channels:
+            x = self._reject(x)          # on the raw signal, before any filtering
         if self.kernel is not None:
             x = self._filter(x)
         if self.normalize:

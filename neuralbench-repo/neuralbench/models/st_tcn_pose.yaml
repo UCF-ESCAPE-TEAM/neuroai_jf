@@ -2,38 +2,53 @@ brain_model_config:
   =replace=: true
   name: "StTcnPose"
   # ---- front end (EmgFrontEnd, no parameters) ----
-  # Disabled by default: the model reads the raw µV the challenge serves, like
-  # VEMG2Pose. Set highpass/lowpass/notch (Hz) to add a FIR, normalize: true
-  # for a per-channel z-score.
-  sfreq: 2000.0         # training sampling rate; fixes the FIR design if any
-  highpass: 20.0        # e.g. 20.0
-  lowpass: 450.0         # e.g. 450.0
-  notch: 60.0           # e.g. 60.0 (mains + harmonics)
+  # normalize: true is REQUIRED for Codabench submissions: the server feeds
+  # EMG at a different scale than the NeuralBench cache, and only the
+  # per-window z-score makes the model unit-invariant (a model trained
+  # without it scored 19.4 deg on Codabench vs 16.7 deg locally).
+  # The filters are optional (neutral in our runs); null disables each one.
+  sfreq: 2000.0         # training sampling rate; fixes the FIR design
+  highpass: 20.0
+  lowpass: 450.0
+  notch: 60.0           # mains + harmonics inside the pass band
   notch_width: 6.0
-  fir_taps: 2001        # only used when a filter edge is set. 1.0 s kernel;
-                        # causal: also the group delay (0.5 s) -> use 401.
-  normalize: false      # true: z-score per channel (window-level, or
+  fir_taps: 2001        # 1.0 s kernel; causal: also the group delay (0.5 s)
+                        # -> use 401 for a causal run
+  normalize: true       # z-score per channel (window-level, or
                         # expanding-window when causal)
-  clip: null            # clamp |x| (in SD units when normalized)
+  clip: null            # clamp |x| in SD units
+  # per-window bad-channel rejection + ring interpolation, on the raw signal
+  # before the FIR. A channel is replaced by the mean of its two ring
+  # neighbours when its RMS or its mains-band energy is > mean + n*std across
+  # the 16 channels of that window.
+  reject_channels: false    # true to enable (retrain: changes the input)
+  reject_rms_nstd: 3.0
+  reject_mains: 60.0        # 60 Hz mains (US recordings); null disables
+  reject_mains_nstd: 3.0
+  reject_mains_bw: 2.0      # +- Hz around 60 and 120 Hz
+  reject_segment: 400       # causal only: decide from the first 200 ms
+  reject_max_frac: 0.5      # skip a window if more than half its channels flag
+  reject_method: std        # std (mean + n*std, original) | mad (median + n*1.4826*MAD,
+                            # robust: still flags two bad channels at once)
   # ---- spatial 2-D CNN (EEGNet-style over the 16-electrode ring) ----
-  f1: 32                # temporal filters (65-tap FIR bank)
+  f1: 16                # temporal filters (65-tap FIR bank)
   k_e: 65
   spatial_mode: conv2d  # conv2d | none   (ring convs between temporal and spatial filter)
   spatial_layers: 2
   k_s: 9
   depth_mult: 2         # spatial filters per temporal map
-  f2: 128
+  f2: 64
   k_sep: 16
   pool1: 5              # 2000 Hz -> 400 Hz
   pool2: 8              # 400 Hz -> 50 Hz feature rate
-  spatial_dropout: 0.1
+  spatial_dropout: 0.2
   # ---- TCN (EEG-TCNet residual dilated blocks at 50 Hz) ----
   tcn_modules: 2
   tcn_blocks: 3         # dilations 1, 2, 4 -> RF 43 steps / module, 85 total (1.7 s)
-  tcn_filters: 128
+  tcn_filters: 64
   tcn_kernel: 4
   tcn_residual: true
-  tcn_dropout: 0.1
+  tcn_dropout: 0.2
   # ---- output head ----
   # linear:   1x1 readout, one pose per 50 Hz frame (original; no continuity prior)
   # smooth:   + learnable depthwise head_smooth_k-tap filter per joint (moving
@@ -41,7 +56,7 @@ brain_model_config:
   # velocity: readout emits position + velocity; pose = position for the first
   #           head_position_steps frames, then previous pose + head_vel_scale *
   #           velocity (VEMG2Pose's hybrid parameterisation, no LSTM)
-  head_kind: smooth
+  head_kind: linear
   head_smooth_k: 5            # smooth only; odd -> centred. 5 frames = 100 ms
   head_position_steps: 12     # velocity only; 12 frames = 240 ms (VEMG2Pose: 250 ms)
   head_vel_scale: 0.02        # velocity only; rad per frame per unit readout
@@ -52,9 +67,3 @@ brain_model_config:
   #        forward-only TCN, zero-order-hold upsampling); output at t uses
   #        x[..t] only. Checkpoints load across both settings.
   causal: false
-
-
-infra:
-  gpus_per_node: 1
-
-delete_checkpoints_on_exit: false
