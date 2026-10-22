@@ -1,15 +1,15 @@
 """Spatial-CNN + TCN EMG-to-pose model (StTcnPose).
 
-    EMG (B, C, T) --> EmgFrontEnd (no params) --> SpatialBlock (EEGNet-style 2-D
+    EMG (B, C, T) --> EmgPreproc (no params) --> SpatialBlock (EEGNet-style 2-D
     CNN over the electrode ring, pools to ~50 Hz) --> TCN (EEG-TCNet residual
     dilated blocks) --> 1x1 head --> upsample --> joint angles (B, T, n_outputs)
 
 ``causal`` switches the whole model between
 
 * **non-causal** (default, offline): zero-phase front end, centred "same"
-  convolutions, window-level z-score, linear upsampling. Every output sample
+  convolutions, window-level scaling, linear upsampling. Every output sample
   may use the whole window; this is what the competition allows.
-* **causal** (online): left-only padding everywhere, expanding-window z-score,
+* **causal** (online): left-only padding everywhere, running (expanding-window) scaling,
   forward-only TCN, zero-order-hold upsampling from the last *completed*
   feature frame. The output at sample ``t`` depends on ``x[.. t]`` only
   (except the first ``pool1 * pool2`` samples of a window, which use frame 0).
@@ -24,29 +24,35 @@ import torch.nn.functional as F
 from torch import nn
 
 from .base import BaseBrainModelConfig
-from .emg_frontend import EmgFrontEnd
+from .emg_frontend import EmgPreproc, frontend_from_config
 
 
 class StTcnPose(BaseBrainModelConfig):
     """Config for :class:`StTcnPoseModel`.
 
-    Front-end fields mirror :class:`EmgFrontEnd`; ``sfreq`` is the training
+    Front-end fields mirror :class:`EmgPreproc`; ``sfreq`` is the training
     sampling rate and fixes the FIR design. Model fields are listed in
     :attr:`StTcnPoseModel.MODEL_FIELDS`.
     """
 
-    # front end (EmgFrontEnd). normalize=True is required for unit-invariance
-    # (the Codabench server feeds EMG at a different scale than the NeuralBench
-    # cache); the filters are optional.
+    # front end (EmgPreproc): one scipy FIR (band-pass + notch) and per-window
+    # scaling. Keep a per-window scaling on: the Codabench server feeds EMG at a
+    # different scale than the NeuralBench cache, and only a per-window scaling
+    # makes the model unit-invariant.
     sfreq: float = 2000.0
-    highpass: float | None = 20.0
-    lowpass: float | None = 450.0
-    notch: float | None = 60.0
+    l_freq: float | None = 20.0
+    h_freq: float | None = 450.0
+    notch_freqs: tuple[float, ...] | None = (60.0, 120.0, 180.0)
     notch_width: float = 6.0
-    fir_taps: int = 2001
-    normalize: bool = True
+    bp_taps: int | None = None
+    notch_taps: int | None = None
+    norm: tp.Literal["maxabs", "minmax", "robust", "zscore", "none"] = "maxabs"
+    scope: tp.Literal["channel", "window", "batch"] = "channel"
+    signed: bool = True
+    robust_q: float = 0.005
+    eps: float = 1e-6
     clip: float | None = None
-    # per-window bad-channel rejection + ring interpolation (EmgFrontEnd)
+    # per-window bad-channel rejection + ring interpolation (EmgPreproc)
     reject_channels: bool = False
     reject_rms_nstd: float = 3.0
     reject_mains: float | None = 60.0
@@ -84,16 +90,7 @@ class StTcnPose(BaseBrainModelConfig):
 
     def build(self, n_spatial_locations: int, n_outputs: int | None) -> nn.Module:
         assert n_outputs is not None, "StTcnPose requires n_outputs"
-        frontend = EmgFrontEnd(
-            n_channels=n_spatial_locations, sfreq=self.sfreq, highpass=self.highpass,
-            lowpass=self.lowpass, notch=self.notch, notch_width=self.notch_width,
-            numtaps=self.fir_taps, normalize=self.normalize, clip=self.clip,
-            causal=self.causal,
-            reject_channels=self.reject_channels, reject_rms_nstd=self.reject_rms_nstd,
-            reject_mains=self.reject_mains, reject_mains_nstd=self.reject_mains_nstd,
-            reject_mains_bw=self.reject_mains_bw, reject_segment=self.reject_segment,
-            reject_max_frac=self.reject_max_frac, reject_method=self.reject_method,
-        )
+        frontend = frontend_from_config(n_spatial_locations, self.model_dump())
         model_kwargs = {k: getattr(self, k) for k in StTcnPoseModel.MODEL_FIELDS}
         return StTcnPoseModel(n_in_channels=n_spatial_locations, n_outputs=n_outputs,
                               sfreq=self.sfreq, frontend=frontend, **model_kwargs)
@@ -319,7 +316,7 @@ class StTcnPoseModel(nn.Module):
         super().__init__()
         self.causal = causal
         # parameter-free preprocessing applied to every EMG window, train and test
-        self.frontend = frontend if frontend is not None else EmgFrontEnd(
+        self.frontend = frontend if frontend is not None else EmgPreproc(
             n_in_channels, sfreq=sfreq, causal=causal)
         self.spatial = SpatialBlock(
             n_in_channels, f1, k_e, spatial_mode, spatial_layers, k_s, depth_mult,

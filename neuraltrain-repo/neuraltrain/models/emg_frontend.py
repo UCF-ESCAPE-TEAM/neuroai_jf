@@ -1,12 +1,39 @@
-"""Parameter-free EMG conditioning: bad-channel rejection + interpolation,
-FIR band-pass / notch, standardisation.
+"""Parameter-free EMG front end: band-pass + notch (one scipy FIR) + per-window scaling.
 
-Non-causal (default): zero-phase centred FIR and per-window z-score, as in
-offline processing (``filtfilt``-style).  Causal: the same FIR applied with
-left-only padding (output at ``t`` uses ``x[t-K+1 .. t]``) and an
-expanding-window z-score (running mean / SD up to ``t``), so nothing in the
-output depends on samples after ``t``.
+Drop it in as the first layer of the model (``self.frontend = EmgPreproc(...)``)
+so train and test see exactly the same preprocessing and it ships inside
+``submission.py`` with nothing to install: only torch + scipy (scipy comes
+with scikit-learn / mne in the Codabench worker image).
+
+    EMG (B, C, T) --> [bad-channel rejection] --> FIR band-pass+notch (FFT conv)
+                  --> scaling --> [clip] --> (B, C, T)
+
+The FIR is designed ONCE in ``__init__`` with ``scipy.signal.firwin`` from the
+training ``sfreq`` and kept as a non-persistent buffer, so ``weights.pt`` stays
+architecture-only and the filter is rebuilt from the config at load time.
+
+Scaling ("norm") options, all computed per window (never across the batch):
+    "maxabs"  x / max|x|                 -> [-1, 1], keeps zero at zero  (recommended)
+    "minmax"  (x - min) / (max - min)    -> [0, 1]   (or [-1, 1] with signed=True)
+    "robust"  like minmax but with the q / 1-q quantiles instead of min / max,
+              then clamped: one artifact sample no longer sets the scale
+    "zscore"  (x - mean) / std
+    "none"
+``scope="channel"`` scales each channel on its own (removes electrode-gain and
+impedance differences between users); ``scope="window"`` uses one scale for all
+16 channels of the window (keeps the relative amplitude pattern across the ring).
+``scope="batch"`` exists only for experiments: it makes a prediction depend on
+which other windows happen to be in the batch, which the server does not
+guarantee to be reproducible (batch size 64 during scoring, any size allowed).
+
+``causal=True`` (the model's online mode): the FIR is applied with left-only
+padding (group delay ``(taps - 1) / 2`` samples) and the scaling uses
+expanding-window statistics (running max / min / mean / std up to ``t``), so
+the output at ``t`` never depends on samples after ``t``. ``robust`` has no
+cheap running form and is refused in causal mode.
 """
+
+import warnings
 
 import numpy as np
 import torch
@@ -15,11 +42,258 @@ from scipy import signal
 from torch import nn
 
 
-def _design_fir(sfreq: float, highpass: float | None, lowpass: float | None,
-                notch: float | None, notch_width: float, numtaps: int) -> np.ndarray | None:
-    """One multi-band linear-phase FIR of ``numtaps`` taps: band-pass edges plus a
-    stop band around the notch frequency and each harmonic inside the pass band.
-    Returns None when nothing is requested."""
+def design_fir(sfreq: float, l_freq: float | None, h_freq: float | None,
+               notch_freqs: tuple[float, ...] | None = None, notch_width: float = 6.0,
+               bp_taps: int | None = None, notch_taps: int | None = None,
+               window: str = "hamming") -> np.ndarray | None:
+    """Band-pass + notch as ONE symmetric (zero-phase) FIR, designed with scipy.
+
+    Tap counts follow MNE's rule of thumb for a Hamming window
+    (``3.3 * sfreq / transition_bandwidth``, rounded to odd); pass ``bp_taps`` /
+    ``notch_taps`` to override. The cascade is obtained by convolving the kernels.
+    """
+    nyq = sfreq / 2.0
+
+    def odd(n: float) -> int:
+        n = int(np.ceil(n))
+        return n if n % 2 else n + 1
+
+    h = None
+    if l_freq is not None or h_freq is not None:
+        lo = l_freq if l_freq is not None else 0.0
+        hi = h_freq if h_freq is not None else nyq
+        trans = min(max(lo * 0.25, 2.0), max(0.25 * (nyq - hi), 2.0))  # MNE-like auto transition
+        n = bp_taps or odd(3.3 * sfreq / trans)
+        if lo > 0 and hi < nyq:
+            h = signal.firwin(n, [lo, hi], pass_zero=False, window=window, fs=sfreq)
+        elif lo > 0:
+            h = signal.firwin(n, lo, pass_zero=False, window=window, fs=sfreq)
+        else:
+            h = signal.firwin(n, hi, pass_zero=True, window=window, fs=sfreq)
+    for f0 in (notch_freqs or ()):
+        if f0 + notch_width / 2 >= nyq:
+            continue
+        n = notch_taps or odd(3.3 * sfreq / (notch_width / 2))
+        hn = signal.firwin(n, [f0 - notch_width / 2, f0 + notch_width / 2],
+                           pass_zero=True, window=window, fs=sfreq)  # band-stop
+        h = hn if h is None else np.convolve(h, hn)
+    return None if h is None else h.astype(np.float32)
+
+
+class EmgPreproc(nn.Module):
+    NORMS = ("maxabs", "minmax", "robust", "zscore", "none")
+    SCOPES = ("channel", "window", "batch")
+
+    def __init__(self, n_channels: int = 16, sfreq: float = 2000.0,
+                 l_freq: float | None = 20.0, h_freq: float | None = 450.0,
+                 notch_freqs: tuple[float, ...] | None = (60.0, 120.0, 180.0),
+                 notch_width: float = 6.0, bp_taps: int | None = None,
+                 notch_taps: int | None = None,
+                 norm: str = "maxabs", scope: str = "channel", signed: bool = True,
+                 robust_q: float = 0.005, eps: float = 1e-6, clip: float | None = None,
+                 causal: bool = False,
+                 reject_channels: bool = False, reject_rms_nstd: float = 3.0,
+                 reject_mains: float | None = 60.0, reject_mains_nstd: float = 3.0,
+                 reject_mains_bw: float = 2.0, reject_segment: int = 400,
+                 reject_max_frac: float = 0.5, reject_method: str = "std",
+                 kernel: np.ndarray | None = None):
+        super().__init__()
+        if norm not in self.NORMS:
+            raise ValueError(f"norm must be maxabs|minmax|robust|zscore|none, got {norm!r}")
+        if scope not in self.SCOPES:
+            raise ValueError(f"scope must be channel|window|batch, got {scope!r}")
+        if causal and norm == "robust":
+            raise ValueError("norm='robust' has no running form; use maxabs/minmax/zscore when causal")
+        if causal and scope == "batch":
+            raise ValueError("scope='batch' is not causal")
+        if reject_method not in ("std", "mad"):
+            raise ValueError(f"reject_method must be 'std' or 'mad', got {reject_method!r}")
+        self.n_channels, self.sfreq = n_channels, float(sfreq)
+        self.norm, self.scope, self.signed = norm, scope, signed
+        self.robust_q, self.eps, self.clip = robust_q, eps, clip
+        self.causal = causal
+        self.reject_channels = reject_channels
+        self.reject_rms_nstd, self.reject_mains = reject_rms_nstd, reject_mains
+        self.reject_mains_nstd, self.reject_mains_bw = reject_mains_nstd, reject_mains_bw
+        self.reject_segment, self.reject_max_frac = reject_segment, reject_max_frac
+        self.reject_method = reject_method
+        self.last_reject_fraction: float = 0.0
+        if kernel is None:
+            kernel = design_fir(self.sfreq, l_freq, h_freq, notch_freqs, notch_width, bp_taps, notch_taps)
+        if kernel is None:
+            self.kernel = None
+        else:
+            # not a parameter, not persisted: rebuilt from the config, never from weights.pt
+            self.register_buffer("kernel", torch.as_tensor(np.asarray(kernel, dtype=np.float32)),
+                                 persistent=False)
+        self.n_taps = 0 if kernel is None else int(len(kernel))
+
+    # ------------------------------------------------------------ rejection
+    def _outliers(self, v: torch.Tensor, n: float) -> torch.Tensor:
+        """Outliers across channels, per window. (B, C) -> bool (B, C).
+
+        "std": v > mean + n*std.  "mad": v > median + n*1.4826*MAD (robust: two
+        loud channels cannot hide each other; use n ~ 5).
+        """
+        if self.reject_method == "mad":
+            med = v.median(-1, keepdim=True).values
+            mad = (v - med).abs().median(-1, keepdim=True).values
+            return v > med + n * 1.4826 * mad
+        return v > v.mean(-1, keepdim=True) + n * v.std(-1, keepdim=True, unbiased=False)
+
+    def bad_channel_mask(self, x: torch.Tensor) -> torch.Tensor:
+        """Bool mask (B, C): channels whose RMS or mains-band energy (±reject_mains_bw
+        Hz around reject_mains and its 2nd harmonic) is an outlier in that window.
+        Causal: statistics from the first ``reject_segment`` samples. Windows with
+        more than ``reject_max_frac`` of the channels flagged are left untouched."""
+        seg = (x[..., : self.reject_segment] if self.causal else x).float()
+        bad = self._outliers(seg.pow(2).mean(-1).sqrt(), self.reject_rms_nstd)
+        if self.reject_mains is not None:
+            spec = torch.fft.rfft(seg, dim=-1).abs()
+            freqs = torch.fft.rfftfreq(seg.shape[-1], d=1.0 / self.sfreq).to(seg.device)
+            band = torch.zeros_like(freqs, dtype=torch.bool)
+            for harmonic in (1, 2):
+                f0 = self.reject_mains * harmonic
+                if f0 < self.sfreq / 2:
+                    band |= (freqs - f0).abs() <= self.reject_mains_bw
+            bad |= self._outliers(spec[..., band].sum(-1), self.reject_mains_nstd)
+        too_many = bad.float().mean(-1, keepdim=True) > self.reject_max_frac
+        return bad & ~too_many
+
+    def reject(self, x: torch.Tensor) -> torch.Tensor:
+        """Replace flagged channels by the mean of their two ring neighbours (circular)."""
+        bad = self.bad_channel_mask(x)
+        self.last_reject_fraction = bad.float().mean().item()
+        if not bool(bad.any()):
+            return x
+        neighbours = (x.roll(1, dims=1) + x.roll(-1, dims=1)) / 2
+        return torch.where(bad.unsqueeze(-1), neighbours, x)
+
+    # ------------------------------------------------------------ filtering
+    @staticmethod
+    def _pad_reflect(x: torch.Tensor, left: int, right: int) -> torch.Tensor:
+        """Odd reflection about the end samples (MNE 'reflect_limited'), zeros beyond."""
+        T = x.shape[-1]
+        ml, mr = min(left, T - 1), min(right, T - 1)
+        parts = []
+        if left > ml:
+            parts.append(x.new_zeros(x.shape[:-1] + (left - ml,)))
+        if ml:
+            parts.append(2 * x[..., :1] - x[..., 1:ml + 1].flip(-1))
+        parts.append(x)
+        if mr:
+            parts.append(2 * x[..., -1:] - x[..., -mr - 1:-1].flip(-1))
+        if right > mr:
+            parts.append(x.new_zeros(x.shape[:-1] + (right - mr,)))
+        return torch.cat(parts, dim=-1)
+
+    def filter(self, x: torch.Tensor) -> torch.Tensor:
+        """'Same'-length FIR via FFT: O(T log T) whatever the tap count.
+
+        Centred / zero phase (output t uses x[t-k//2 .. t+k//2]) or, when causal,
+        left-aligned (output t uses x[t-k+1 .. t]).
+        """
+        k = self.n_taps
+        T = x.shape[-1]
+        left, right = (k - 1, 0) if self.causal else (k // 2, k // 2)
+        xp = self._pad_reflect(x.float(), left, right)
+        n = xp.shape[-1] + k - 1
+        y = torch.fft.irfft(torch.fft.rfft(xp, n=n) * torch.fft.rfft(self.kernel, n=n), n=n)
+        return y[..., k - 1: k - 1 + T].to(x.dtype)
+
+    # ---------------------------------------------------------- normalising
+    def _reduce_dims(self) -> tuple[int, ...]:
+        return {"channel": (-1,), "window": (-2, -1), "batch": (0, -2, -1)}[self.scope]
+
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
+        if self.norm == "none":
+            return x
+        if self.causal:
+            return self._normalize_causal(x)
+        dims = self._reduce_dims()
+        if self.norm == "zscore":
+            mean = x.mean(dims, keepdim=True)
+            std = x.std(dims, keepdim=True, unbiased=False)
+            return (x - mean) / (std + self.eps)
+        if self.norm == "maxabs":
+            return x / (x.abs().amax(dims, keepdim=True) + self.eps)
+        if self.norm == "minmax":
+            lo, hi = x.amin(dims, keepdim=True), x.amax(dims, keepdim=True)
+        else:  # robust: quantiles instead of extremes, via kthvalue (no size limit)
+            B, C, _ = x.shape
+            flat = {"channel": x, "window": x.reshape(B, 1, -1),
+                    "batch": x.reshape(1, 1, -1)}[self.scope]
+            n = flat.shape[-1]
+            k_lo = max(1, int(round(self.robust_q * n)))
+            k_hi = max(1, int(round((1 - self.robust_q) * n)))
+            lo = flat.kthvalue(k_lo, dim=-1, keepdim=True).values   # (B,C,1) / (B,1,1) / (1,1,1)
+            hi = flat.kthvalue(k_hi, dim=-1, keepdim=True).values
+        y = (x - lo) / (hi - lo + self.eps)
+        if self.norm == "robust":
+            y = y.clamp(0.0, 1.0)
+        return y * 2 - 1 if self.signed else y
+
+    def _normalize_causal(self, x: torch.Tensor) -> torch.Tensor:
+        """Same scalings with running statistics over x[.. t] (per channel, or over
+        all channels of the window so far when scope='window')."""
+        xd = x.double()
+        if self.scope == "window":                       # running stats over (C, t)
+            B, C, T = xd.shape
+            flat = xd.transpose(1, 2).reshape(B, 1, T * C)   # time-major: all channels of t before t+1
+            y = self._running(flat)
+            return y.reshape(B, T, C).transpose(1, 2).to(x.dtype)
+        return self._running(xd).to(x.dtype)
+
+    def _running(self, xd: torch.Tensor) -> torch.Tensor:
+        if self.norm == "zscore":
+            n = torch.arange(1, xd.shape[-1] + 1, device=xd.device, dtype=torch.float64)
+            mean = xd.cumsum(-1) / n
+            var = (xd * xd).cumsum(-1) / n - mean * mean
+            return (xd - mean) / (var.clamp_min(0).sqrt() + self.eps)
+        if self.norm == "maxabs":
+            return xd / (xd.abs().cummax(-1).values + self.eps)
+        lo, hi = xd.cummin(-1).values, xd.cummax(-1).values   # minmax
+        y = (xd - lo) / (hi - lo + self.eps)
+        return y * 2 - 1 if self.signed else y
+
+    # --------------------------------------------------------------- forward
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, C, T) -> (B, C, T)
+        if self.reject_channels:
+            x = self.reject(x)         # on the raw signal, before the filter
+        if self.kernel is not None:
+            x = self.filter(x)         # filter FIRST: removes the DC offset min-max would otherwise keep
+        x = self.normalize(x)
+        if self.clip is not None:
+            x = x.clamp(-self.clip, self.clip)
+        return x
+
+    def extra_repr(self) -> str:
+        return (f"sfreq={self.sfreq}, taps={self.n_taps}, norm={self.norm}, "
+                f"scope={self.scope}, signed={self.signed}, causal={self.causal}, "
+                f"reject={self.reject_channels}")
+
+
+EmgFrontEnd = EmgPreproc   # name used by older code
+
+
+# ---------------------------------------------------------------------------
+# Building from a config dict, with support for checkpoints trained before this
+# front end (raw / R0 / R1): their configs carry highpass / lowpass / notch /
+# notch_width / fir_taps / normalize and used one multi-band firwin kernel plus
+# a per-channel z-score (eps 1e-5). ``frontend_from_config`` rebuilds that
+# exactly so those weights evaluate as trained.
+# ---------------------------------------------------------------------------
+FILTER_KEYS = ("l_freq", "h_freq", "notch_freqs", "notch_width", "bp_taps", "notch_taps")
+SCALE_KEYS = ("norm", "scope", "signed", "robust_q", "eps", "clip")
+COMMON_KEYS = ("sfreq", "causal", "reject_channels", "reject_rms_nstd", "reject_mains",
+               "reject_mains_nstd", "reject_mains_bw", "reject_segment", "reject_max_frac",
+               "reject_method")
+LEGACY_KEYS = ("highpass", "lowpass", "notch", "fir_taps", "normalize")
+FRONTEND_KEYS = FILTER_KEYS + SCALE_KEYS + COMMON_KEYS
+
+
+def legacy_fir_kernel(sfreq: float, highpass: float | None, lowpass: float | None,
+                      notch: float | None, notch_width: float, numtaps: int) -> np.ndarray | None:
     nyq = sfreq / 2.0
     lo = highpass if highpass is not None else 0.0
     hi = lowpass if lowpass is not None else nyq
@@ -36,203 +310,32 @@ def _design_fir(sfreq: float, highpass: float | None, lowpass: float | None,
         edges.append(hi)
     if not edges:
         return None
-    # pass_zero: DC is passed only when there is no high-pass edge
-    h = signal.firwin(numtaps, edges, pass_zero=(lo <= 0), fs=sfreq)
-    return h.astype(np.float32)
+    return signal.firwin(numtaps, edges, pass_zero=(lo <= 0), fs=sfreq).astype(np.float32)
 
 
-class EmgFrontEnd(nn.Module):
-    """Band-pass / notch filter and per-channel standardization.
+def merge_config(base: dict, ckpt: dict | None) -> dict:
+    """``base`` (submission CONFIG) updated by a checkpoint's config. A legacy
+    checkpoint config replaces the new filter/scaling keys instead of mixing."""
+    if not ckpt:
+        return dict(base)
+    merged = {**base, **ckpt}
+    if "fir_taps" in ckpt:
+        for k in FILTER_KEYS + SCALE_KEYS:
+            if k not in ckpt:
+                merged.pop(k, None)
+    return merged
 
-    Parameters
-    ----------
-    n_channels : int
-        EMG channels (16 for emg2pose).
-    sfreq : float
-        Sampling rate in Hz (2000 for emg2pose).
-    highpass, lowpass : float or None
-        Band-pass cutoffs in Hz. ``None`` disables that side.
-    notch : float or None
-        Mains frequency; this and every harmonic below Nyquist are removed.
-    notch_width : float
-        Full stop-band width of each notch in Hz. With the default 2001 taps a
-        6 Hz notch attenuates 60 Hz by ~55 dB; 801 taps need ~10 Hz for the same.
-    numtaps : int
-        FIR length (odd). 2001 taps at 2 kHz = 1.0 s kernel, transition ~ 4 Hz;
-        use 801 for a cheaper filter when no notch is needed.
-    normalize : bool
-        Zero mean / unit SD per channel: over the whole window (non-causal) or
-        over the samples seen so far (causal).
-    clip : float or None
-        Clamp |x| after normalization (in SD units) to guard against spikes.
-    causal : bool
-        Left-only FIR padding and expanding-window statistics. The symmetric
-        FIR then has a group delay of ``(numtaps - 1) / 2`` samples (0.5 s for
-        2001 taps at 2 kHz); use fewer taps (e.g. 401 -> 0.1 s) for a causal
-        model.
-    reject_channels : bool
-        Per-window bad-channel rejection + ring interpolation, applied to the
-        raw signal before the FIR. A channel is bad when, within the window,
-        its RMS or its mains-band energy is an outlier across channels
-        (``mean + n * std``). Bad channels are replaced by the mean of their
-        two ring neighbours (circular, so channel 0 and C-1 are neighbours).
-    reject_rms_nstd : float
-        ``n`` for the RMS criterion.
-    reject_mains : float or None
-        Mains frequency for the power-line criterion (energy within
-        ``+-reject_mains_bw`` Hz of the fundamental and 2nd harmonic);
-        ``None`` disables that criterion.
-    reject_mains_nstd, reject_mains_bw : float
-        ``n`` and half-bandwidth (Hz) for the power-line criterion.
-    reject_segment : int
-        Causal mode only: the statistics are computed on the first
-        ``reject_segment`` samples of the window and the decision applied to
-        the whole window (so the first ``reject_segment`` samples are not
-        strictly causal). Non-causal mode uses the whole window.
-    reject_max_frac : float
-        Safety valve: if more than this fraction of channels is flagged in a
-        window, nothing is interpolated there (the statistics are then
-        unreliable, e.g. a window of pure noise).
-    reject_method : {"std", "mad"}
-        Outlier rule across channels: ``mean + n*std`` (original) or the robust
-        ``median + n*1.4826*MAD`` (recommended with 16 channels: it still flags
-        two simultaneously bad channels, which mask each other under "std").
-    """
 
-    def __init__(self, n_channels: int = 16, sfreq: float = 2000.0,
-                 highpass: float | None = 20.0, lowpass: float | None = None,
-                 notch: float | None = None, notch_width: float = 6.0,
-                 numtaps: int = 2001, normalize: bool = True, clip: float | None = 20.0,
-                 causal: bool = False,
-                 reject_channels: bool = False, reject_rms_nstd: float = 3.0,
-                 reject_mains: float | None = 60.0, reject_mains_nstd: float = 3.0,
-                 reject_mains_bw: float = 2.0, reject_segment: int = 400,
-                 reject_max_frac: float = 0.5, reject_method: str = "std"):
-        super().__init__()
-        self.n_channels = n_channels
-        self.sfreq = float(sfreq)
-        self.normalize = normalize
-        self.clip = clip
-        self.causal = causal
-        self.reject_channels = reject_channels
-        self.reject_rms_nstd = reject_rms_nstd
-        self.reject_mains = reject_mains
-        self.reject_mains_nstd = reject_mains_nstd
-        self.reject_mains_bw = reject_mains_bw
-        self.reject_segment = reject_segment
-        self.reject_max_frac = reject_max_frac
-        if reject_method not in ("std", "mad"):
-            raise ValueError(f"reject_method must be 'std' or 'mad', got {reject_method!r}")
-        self.reject_method = reject_method
-        # fraction of (window, channel) pairs interpolated in the last forward;
-        # for monitoring, not part of the state
-        self.last_reject_fraction: float = 0.0
-        h = _design_fir(sfreq, highpass, lowpass, notch, notch_width, numtaps)
-        if h is None:
-            self.kernel = None
-        else:
-            # FIR taps (K,); not a parameter and not persisted: rebuilt from the
-            # config at construction, so weights.pt stays architecture-only.
-            self.register_buffer("kernel", torch.from_numpy(h), persistent=False)
-
-    # ------------------------------------------------------------ rejection
-    def _outliers(self, v: torch.Tensor, n: float) -> torch.Tensor:
-        """Outliers across channels, per window. (B, C) -> bool (B, C).
-
-        ``reject_method="std"``: ``v > mean + n * std`` (the original rule).
-        ``reject_method="mad"``: ``v > median + n * 1.4826 * MAD`` -- the robust
-        equivalent; with 16 channels two loud channels inflate the std enough
-        to hide each other from the "std" rule, the MAD rule still flags both.
-        """
-        if self.reject_method == "mad":
-            med = v.median(-1, keepdim=True).values
-            mad = (v - med).abs().median(-1, keepdim=True).values
-            return v > med + n * 1.4826 * mad
-        thr = v.mean(-1, keepdim=True) + n * v.std(-1, keepdim=True, unbiased=False)
-        return v > thr
-
-    def bad_channel_mask(self, x: torch.Tensor) -> torch.Tensor:
-        """Bool mask (B, C) of channels to interpolate in each window of ``x`` (B, C, T)."""
-        seg = x[..., : self.reject_segment] if self.causal else x
-        seg = seg.float()
-        rms = seg.pow(2).mean(-1).sqrt()                                 # (B, C)
-        bad = self._outliers(rms, self.reject_rms_nstd)
-        if self.reject_mains is not None:
-            spec = torch.fft.rfft(seg, dim=-1).abs()                     # (B, C, n_freq)
-            freqs = torch.fft.rfftfreq(seg.shape[-1], d=1.0 / self.sfreq).to(seg.device)
-            band = torch.zeros_like(freqs, dtype=torch.bool)
-            for harmonic in (1, 2):
-                f0 = self.reject_mains * harmonic
-                if f0 < self.sfreq / 2:
-                    band |= (freqs - f0).abs() <= self.reject_mains_bw
-            energy = spec[..., band].sum(-1)                             # (B, C)
-            bad |= self._outliers(energy, self.reject_mains_nstd)
-        # too many flagged channels -> statistics meaningless, leave the window alone
-        too_many = bad.float().mean(-1, keepdim=True) > self.reject_max_frac
-        return bad & ~too_many
-
-    @staticmethod
-    def _ring_interpolate(x: torch.Tensor, bad: torch.Tensor) -> torch.Tensor:
-        """Replace flagged channels by the mean of their two ring neighbours.
-
-        (B, C, T), bool (B, C) -> (B, C, T). Neighbours wrap around (the arm
-        band is a ring). Neighbour values are taken from the *input*, so two
-        adjacent bad channels each get a blend of one good and one bad
-        neighbour -- the same as applying the per-channel rule in one pass.
-        """
-        neighbours = (x.roll(1, dims=1) + x.roll(-1, dims=1)) / 2
-        return torch.where(bad.unsqueeze(-1), neighbours, x)
-
-    def _reject(self, x: torch.Tensor) -> torch.Tensor:
-        bad = self.bad_channel_mask(x)
-        self.last_reject_fraction = bad.float().mean().item()
-        if not bool(bad.any()):
-            return x
-        return self._ring_interpolate(x, bad)
-
-    # ------------------------------------------------------------- filtering
-    def _filter(self, x: torch.Tensor) -> torch.Tensor:
-        """'Same'-length convolution with the FIR, via FFT.
-
-        Centred (zero delay) when non-causal, left-aligned when causal. FFT
-        convolution is O(T log T) regardless of kernel length; a direct
-        depthwise conv1d with a 2001-tap kernel is ~50x slower on CPU.
-        """
-        k = self.kernel.shape[-1]
-        T = x.shape[-1]
-        left, right = (k - 1, 0) if self.causal else (k // 2, k // 2)
-        mode = "reflect" if T > max(left, right) else "replicate"
-        xp = F.pad(x, (left, right), mode=mode)  # reflect pad: no edge transient
-        n = xp.shape[-1] + k - 1
-        X = torch.fft.rfft(xp.float(), n=n)
-        H = torch.fft.rfft(self.kernel.float(), n=n)
-        y = torch.fft.irfft(X * H, n=n)
-        # full convolution -> output j uses xp[j .. j+k-1]; with the padding
-        # above that is x[j-k//2 .. j+k//2] (centred) or x[j-k+1 .. j] (causal)
-        y = y[..., k - 1: k - 1 + T]
-        return y.to(x.dtype)
-
-    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
-        if not self.causal:
-            mean = x.mean(dim=-1, keepdim=True)
-            std = x.std(dim=-1, keepdim=True, unbiased=False)
-            return (x - mean) / (std + 1e-5)
-        # expanding-window statistics: mean / SD of x[.. t] at every t
-        # (float64 cumsums: sums of squares over 10^4 samples exceed float32)
-        xd = x.double()
-        n = torch.arange(1, x.shape[-1] + 1, device=x.device, dtype=torch.float64)
-        mean = xd.cumsum(-1) / n
-        var = (xd * xd).cumsum(-1) / n - mean * mean
-        y = (xd - mean) / (var.clamp_min(0).sqrt() + 1e-5)
-        return y.to(x.dtype)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, C, T) -> (B, C, T)
-        if self.reject_channels:
-            x = self._reject(x)          # on the raw signal, before any filtering
-        if self.kernel is not None:
-            x = self._filter(x)
-        if self.normalize:
-            x = self._normalize(x)
-        if self.clip is not None:
-            x = x.clamp(-self.clip, self.clip)
-        return x
+def frontend_from_config(n_channels: int, cfg: dict) -> EmgPreproc:
+    common = {k: cfg[k] for k in COMMON_KEYS if k in cfg}
+    if "fir_taps" in cfg:                      # legacy checkpoint
+        warnings.warn("legacy front end (multi-band firwin + z-score) rebuilt from the checkpoint config")
+        kernel = legacy_fir_kernel(cfg["sfreq"], cfg.get("highpass"), cfg.get("lowpass"),
+                                   cfg.get("notch"), cfg.get("notch_width", 6.0), cfg["fir_taps"])
+        return EmgPreproc(n_channels, l_freq=None, h_freq=None, notch_freqs=None, kernel=kernel,
+                          norm="zscore" if cfg.get("normalize", True) else "none", scope="channel",
+                          eps=1e-5, clip=cfg.get("clip"), **common)
+    kw = {k: cfg[k] for k in FILTER_KEYS + SCALE_KEYS if k in cfg}
+    if kw.get("notch_freqs") is not None:
+        kw["notch_freqs"] = tuple(kw["notch_freqs"])
+    return EmgPreproc(n_channels, **kw, **common)
