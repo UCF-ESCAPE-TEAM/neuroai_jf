@@ -52,3 +52,9 @@ brain_model_config:
   #        forward-only TCN, zero-order-hold upsampling); output at t uses
   #        x[..t] only. Checkpoints load across both settings.
   causal: false
+
+
+infra:
+  gpus_per_node: 1
+
+delete_checkpoints_on_exit: false

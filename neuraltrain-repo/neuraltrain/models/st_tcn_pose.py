@@ -35,14 +35,16 @@ class StTcnPose(BaseBrainModelConfig):
     :attr:`StTcnPoseModel.MODEL_FIELDS`.
     """
 
-    # front end (EmgFrontEnd); filtering and normalisation are off by default
+    # front end (EmgFrontEnd). normalize=True is required for unit-invariance
+    # (the Codabench server feeds EMG at a different scale than the NeuralBench
+    # cache); the filters are optional.
     sfreq: float = 2000.0
-    highpass: float | None = None
-    lowpass: float | None = None
-    notch: float | None = None
+    highpass: float | None = 20.0
+    lowpass: float | None = 450.0
+    notch: float | None = 60.0
     notch_width: float = 6.0
     fir_taps: int = 2001
-    normalize: bool = False
+    normalize: bool = True
     clip: float | None = None
     # spatial 2-D CNN
     f1: int = 16
@@ -223,44 +225,40 @@ class TcnModule(nn.Module):
 # =============================================================================
 # Output head
 # =============================================================================
-class PoseHead(nn.Module):
-    """TCN features ``(B, F, T')`` -> joint angles ``(B, J, T')`` at the feature rate.
+class PosePost(nn.Module):
+    """Turns the 1x1 ``head`` readout into a pose trajectory ``(B, J, T')``.
 
-    kind="linear"   : 1x1 conv readout, one pose per frame, no continuity prior
-                      (state-dict compatible with the original ``head`` conv).
-    kind="smooth"   : the same readout followed by a learnable depthwise
-                      ``smooth_k``-tap filter per joint, initialised to a moving
-                      average (centred, or left-aligned when causal).
-    kind="velocity" : the readout emits a position AND a velocity per joint
-                      (2J channels). The pose is the position for the first
+    kind="linear"   : identity -- one pose per frame, no continuity prior.
+    kind="smooth"   : learnable depthwise ``smooth_k``-tap filter per joint,
+                      initialised to a moving average (centred, or left-aligned
+                      when causal). Adds ``J * smooth_k`` parameters.
+    kind="velocity" : the readout has 2J channels, a position AND a velocity per
+                      joint. The pose is the position for the first
                       ``position_steps`` frames and from there on the previous
                       pose plus ``vel_scale`` x velocity -- VEMG2Pose's hybrid
-                      parameterisation, without the LSTM. Integration is a
-                      cumulative sum, so it is causal by construction.
+                      parameterisation without the LSTM. The cumulative sum is
+                      causal by construction. No parameters.
     """
 
-    def __init__(self, c_in: int, n_outputs: int, kind: str = "linear",
-                 smooth_k: int = 5, position_steps: int = 12, vel_scale: float = 0.02,
-                 causal: bool = False):
+    def __init__(self, n_outputs: int, kind: str = "linear", smooth_k: int = 5,
+                 position_steps: int = 12, vel_scale: float = 0.02, causal: bool = False):
         super().__init__()
         if kind not in ("linear", "smooth", "velocity"):
             raise ValueError(f"head_kind must be linear | smooth | velocity, got {kind!r}")
         self.kind = kind
-        self.n_outputs = n_outputs
         self.position_steps = position_steps
         self.vel_scale = vel_scale
-        n_out = 2 * n_outputs if kind == "velocity" else n_outputs
-        # named ``proj`` inside the head; StTcnPoseModel aliases it so that the
-        # original key ``head.weight`` keeps loading for kind="linear"
-        self.proj = nn.Conv1d(c_in, n_out, 1)
         if kind == "smooth":
             self.pad = _same_pad(smooth_k, causal)
             self.smooth = nn.Conv1d(n_outputs, n_outputs, smooth_k, groups=n_outputs, bias=False)
             with torch.no_grad():
                 self.smooth.weight.fill_(1.0 / smooth_k)   # moving average at init
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        y = self.proj(z)
+    @staticmethod
+    def readout_channels(n_outputs: int, kind: str) -> int:
+        return 2 * n_outputs if kind == "velocity" else n_outputs
+
+    def forward(self, y: torch.Tensor) -> torch.Tensor:
         if self.kind == "linear":
             return y
         if self.kind == "smooth":
@@ -298,6 +296,8 @@ class StTcnPoseModel(nn.Module):
         # tcn
         tcn_modules=2, tcn_blocks=3, tcn_filters=64, tcn_kernel=4,
         tcn_residual=True, tcn_dropout=0.2,
+        # head
+        head_kind="linear", head_smooth_k=5, head_position_steps=12, head_vel_scale=0.02,
         # causality
         causal: bool = False,
         # preprocessing
@@ -318,7 +318,17 @@ class StTcnPoseModel(nn.Module):
                                      tcn_dropout, tcn_residual, causal))
             c_in = tcn_filters
         self.tcn = nn.Sequential(*modules)
-        self.head = nn.Conv1d(tcn_filters, n_outputs, 1)
+        # ``head`` keeps its name (and state-dict key) for every head_kind; only
+        # its width changes for the velocity head (2J channels).
+        self.head = nn.Conv1d(tcn_filters, PosePost.readout_channels(n_outputs, head_kind), 1)
+        self.head_post = PosePost(n_outputs, head_kind, head_smooth_k,
+                                  head_position_steps, head_vel_scale, causal)
+        if head_kind == "velocity":
+            # start from "hold the position": zero velocity readout at init, so the
+            # integrated trajectory does not random-walk before training
+            with torch.no_grad():
+                self.head.weight[n_outputs:].zero_()
+                self.head.bias[n_outputs:].zero_()
 
         # bookkeeping for the docstring / logs
         self.feature_rate = sfreq / self.spatial.downsample
@@ -345,6 +355,6 @@ class StTcnPoseModel(nn.Module):
         x = self.frontend(x)            # (B, C, T)   filtered + normalised, no parameters
         z = self.spatial(x)             # (B, F2, T')  spatial features at ~50 Hz
         z = self.tcn(z)                 # (B, F_T, T') temporal context
-        y = self.head(z)                # (B, n_outputs, T')
+        y = self.head_post(self.head(z))   # (B, n_outputs, T')  readout -> trajectory
         y = self._upsample(y, n_samples)
         return y.transpose(1, 2)        # (B, T, n_outputs)
