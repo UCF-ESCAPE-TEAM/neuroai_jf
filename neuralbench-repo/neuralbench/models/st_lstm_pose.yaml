@@ -1,0 +1,53 @@
+brain_model_config:
+  =replace=: true
+  name: "StLstmPose"
+  # ---- front end (EmgPreproc): same as st_tcn_pose.yaml ----
+  sfreq: 2000.0
+  l_freq: 20.0
+  h_freq: 450.0
+  notch_freqs: [60.0, 120.0, 180.0]
+  notch_width: 6.0
+  bp_taps: null
+  notch_taps: 801           # 3721-tap cascade (1.9 s) instead of 7921
+  norm: zscore              # R1 used zscore / channel; keep it for a like-for-like comparison
+  scope: channel
+  signed: true
+  robust_q: 0.005
+  eps: 1.0e-6
+  clip: null
+  reject_channels: false
+  reject_rms_nstd: 3.0
+  reject_mains: 60.0
+  reject_mains_nstd: 3.0
+  reject_mains_bw: 2.0
+  reject_segment: 400
+  reject_max_frac: 0.5
+  reject_method: std
+  # ---- spatial 2-D CNN: R1 widths ----
+  f1: 32
+  k_e: 65
+  spatial_mode: conv2d
+  spatial_layers: 2
+  k_s: 9
+  depth_mult: 2
+  f2: 128
+  k_sep: 16
+  pool1: 5                  # 2000 Hz -> 400 Hz
+  pool2: 8                  # 400 Hz -> 50 Hz: the LSTM steps once per 20 ms frame
+  spatial_dropout: 0.2
+  # ---- LSTM decoder (VEMG2Pose-style) ----
+  feature_dim: 64           # 1x1 projection f2 -> feature_dim before the LSTM (VEMG2Pose: 64)
+  hidden_size: 256          # width of h and c (VEMG2Pose: 512). 256 -> ~0.6 M LSTM weights
+  lstm_layers: 2            # stacked LSTMs (VEMG2Pose: 2)
+  condition_on_pose: true   # feed the previous predicted pose back in (VEMG2Pose).
+                            # false: one vectorised nn.LSTM call, ~20x faster, no feedback
+  bidirectional: false      # only with condition_on_pose: false and causal: false
+  parameterization: hybrid  # hybrid | velocity | position  (VEMG2Pose regression ckpt: hybrid)
+  position_steps: 12        # hybrid: frames read as position before velocity integration (240 ms)
+  output_scalar: 0.01       # multiplies the head output (VEMG2Pose: 0.01)
+  decoder_dropout: 0.0      # between the stacked LSTM layers
+  # ---- causality of front end + spatial block (the LSTM itself is always causal) ----
+  causal: false
+
+# ---- delete checkpoints on exit ----
+delete_checkpoints_on_exit: false
