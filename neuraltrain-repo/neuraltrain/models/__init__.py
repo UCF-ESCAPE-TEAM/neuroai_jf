@@ -38,3 +38,4 @@ from . import st_tcn_pose as _StTcnPoseModel  # noqa: F401
 from . import neuraldrive_pose as _NeuralDrivePose
 
 from . import st_lstm_pose as _StLstmPoseModel  # noqa: F401
+from . import st_tcn_pose_cmixup as _StTcnPoseCMixupModel  # noqa: F401  (StTcnPose + C-Mixup)

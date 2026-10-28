@@ -4,6 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import inspect
 import logging
 import typing as tp
@@ -172,6 +173,19 @@ class BrainModule(pl.LightningModule):
             "batch_size": y_true.shape[0],
             "sync_dist": self.trainer.world_size > 1,
         }
+
+        # Optional model-side batch transform during training (e.g. C-Mixup in
+        # StTcnPoseCMixup): ``train_batch_transform(neuro, target, subject_ids)``
+        # returns the (possibly mixed) input and target. The model may expose
+        # ``last_mix_stats`` (dict of floats) which is logged as train/<key>.
+        batch_transform = getattr(self.model, "train_batch_transform", None)
+        if batch_transform is not None and step_name == "train" and self.training:
+            neuro, y_true = batch_transform(
+                batch.data["neuro"], y_true, batch.data.get("subject_id")
+            )
+            batch = dataclasses.replace(batch, data={**batch.data, "neuro": neuro})
+            for k, v in (getattr(self.model, "last_mix_stats", None) or {}).items():
+                self.log(f"{step_name}/{k}", v, **{**log_kwargs, "prog_bar": False})
 
         y_pred = self.model_forward(batch)
 
