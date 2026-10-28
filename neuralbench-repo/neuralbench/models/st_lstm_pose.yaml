@@ -39,10 +39,10 @@ brain_model_config:
   feature_dim: 64           # 1x1 projection f2 -> feature_dim before the LSTM (VEMG2Pose: 64)
   hidden_size: 256          # width of h and c (VEMG2Pose: 512). 256 -> ~0.6 M LSTM weights
   lstm_layers: 2            # stacked LSTMs (VEMG2Pose: 2)
-  condition_on_pose: true   # feed the previous predicted pose back in (VEMG2Pose).
+  condition_on_pose: false   # feed the previous predicted pose back in (VEMG2Pose).
                             # false: one vectorised nn.LSTM call, ~20x faster, no feedback
-  bidirectional: false      # only with condition_on_pose: false and causal: false
-  parameterization: hybrid  # hybrid | velocity | position  (VEMG2Pose regression ckpt: hybrid)
+  bidirectional: true      # only with condition_on_pose: false and causal: false
+  parameterization: position  # hybrid | velocity | position  (VEMG2Pose regression ckpt: hybrid)
   position_steps: 12        # hybrid: frames read as position before velocity integration (240 ms)
   output_scalar: 0.01       # multiplies the head output (VEMG2Pose: 0.01)
   decoder_dropout: 0.0      # between the stacked LSTM layers

@@ -89,4 +89,5 @@ loss:
   weight_in_eval: false
 
 # keep best.ckpt for weight extraction (default True deletes it at run end)
+csv_config: {}
 delete_checkpoints_on_exit: false
