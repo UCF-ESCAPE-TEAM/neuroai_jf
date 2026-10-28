@@ -8,3 +8,4 @@
 from . import base as _base  # noqa: F401
 from . import losses as _losses  # noqa: F401
 from .base import BaseLoss as BaseLoss  # used for configs
+from . import hard_example as _hard_example  # noqa: F401  (GHM-R / OHEM configs)

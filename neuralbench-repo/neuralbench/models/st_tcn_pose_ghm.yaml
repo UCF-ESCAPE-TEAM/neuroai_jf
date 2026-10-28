@@ -1,0 +1,92 @@
+brain_model_config:
+  =replace=: true
+  name: "StTcnPose"
+  # ---- front end (EmgPreproc, no parameters) ----
+  # One scipy FIR: band-pass l_freq-h_freq + a band-stop per notch frequency,
+  # Hamming, tap counts by MNE's rule (3.3 * sfreq / transition); zero phase.
+  # Defaults give 7921 taps = 4 s; notch_taps: 801 shortens the cascade to
+  # ~1.9 s, notch_freqs: null to 0.66 s.
+  sfreq: 2000.0
+  l_freq: 20.0            # null disables the high-pass side
+  h_freq: 450.0           # null disables the low-pass side
+  notch_freqs: [60.0, 120.0, 180.0]   # null disables the notch
+  notch_width: 6.0
+  bp_taps: null           # override the auto tap count of the band-pass
+  notch_taps: null        # override the auto tap count of each notch
+  # Per-window scaling. REQUIRED for Codabench (the server feeds EMG at a
+  # different scale than the NeuralBench cache; only a per-window scaling
+  # makes the model unit-invariant). R1 (16.60 deg) used zscore / channel.
+  norm: maxabs            # maxabs | minmax | robust | zscore | none
+  scope: channel          # channel | window | batch (batch: experiments only)
+  signed: true            # minmax/robust -> [-1, 1] instead of [0, 1]
+  robust_q: 0.005         # robust: quantile pair q / 1-q
+  eps: 1.0e-6
+  clip: null              # clamp |x| after scaling
+  # per-window bad-channel rejection + ring interpolation, on the raw signal
+  # before the FIR. A channel is replaced by the mean of its two ring
+  # neighbours when its RMS or its mains-band energy is > mean + n*std across
+  # the 16 channels of that window.
+  reject_channels: false    # true to enable (retrain: changes the input)
+  reject_rms_nstd: 3.0
+  reject_mains: 60.0        # 60 Hz mains (US recordings); null disables
+  reject_mains_nstd: 3.0
+  reject_mains_bw: 2.0      # +- Hz around 60 and 120 Hz
+  reject_segment: 400       # causal only: decide from the first 200 ms
+  reject_max_frac: 0.5      # skip a window if more than half its channels flag
+  reject_method: std        # std (mean + n*std, original) | mad (median + n*1.4826*MAD,
+                            # robust: still flags two bad channels at once)
+  # ---- spatial 2-D CNN (EEGNet-style over the 16-electrode ring) ----
+  f1: 16                # temporal filters (65-tap FIR bank)
+  k_e: 65
+  spatial_mode: conv2d  # conv2d | none   (ring convs between temporal and spatial filter)
+  spatial_layers: 2
+  k_s: 9
+  depth_mult: 2         # spatial filters per temporal map
+  f2: 64
+  k_sep: 16
+  pool1: 5              # 2000 Hz -> 400 Hz
+  pool2: 8              # 400 Hz -> 50 Hz feature rate
+  spatial_dropout: 0.2
+  # ---- TCN (EEG-TCNet residual dilated blocks at 50 Hz) ----
+  tcn_modules: 2
+  tcn_blocks: 3         # dilations 1, 2, 4 -> RF 43 steps / module, 85 total (1.7 s)
+  tcn_filters: 64
+  tcn_kernel: 4
+  tcn_residual: true
+  tcn_dropout: 0.2
+  # ---- output head ----
+  # linear:   1x1 readout, one pose per 50 Hz frame (original; no continuity prior)
+  # smooth:   + learnable depthwise head_smooth_k-tap filter per joint (moving
+  #           average at init)
+  # velocity: readout emits position + velocity; pose = position for the first
+  #           head_position_steps frames, then previous pose + head_vel_scale *
+  #           velocity (VEMG2Pose's hybrid parameterisation, no LSTM)
+  head_kind: linear
+  head_smooth_k: 5            # smooth only; odd -> centred. 5 frames = 100 ms
+  head_position_steps: 12     # velocity only; 12 frames = 240 ms (VEMG2Pose: 250 ms)
+  head_vel_scale: 0.02        # velocity only; rad per frame per unit readout
+  # ---- causality ----
+  # false: offline / bidirectional (centred convs, window z-score, linear
+  #        upsampling) -- what the competition allows and scores best.
+  # true:  online-capable (left-padded convs, expanding-window z-score,
+  #        forward-only TCN, zero-order-hold upsampling); output at t uses
+  #        x[..t] only. Checkpoints load across both settings.
+  causal: false
+
+# ---- hard example mining: GHM-R (Li et al. AAAI 2019; Lin et al. MSST 2026) ----
+# Replaces the task's L1Loss. ASL1 base loss, per-element gradient-norm
+# histogram, EMA-smoothed; mean weight 1 so the scale matches L1.
+# mu is in radians and must sit near the model's MEDIAN |error| (R1: 16.6 deg
+# MAE ~ 0.29 rad, median lower). Watch train/loss_ghm_frac_top in the log: if it
+# is > 0.5 mu is too small and nearly everything saturates at g ~ 1.
+loss:
+  =replace=: true
+  name: GhmRegressionLoss
+  mu: 0.1
+  bins: 30
+  momentum: 0.75
+  normalize_by: nonempty_bins
+  weight_in_eval: false
+
+# keep best.ckpt for weight extraction (default True deletes it at run end)
+delete_checkpoints_on_exit: false
