@@ -74,8 +74,15 @@ brain_model_config:
   causal: false
 
 # ---- hard example mining: OHEM (Shrivastava et al. CVPR 2016) for regression ----
-# Per batch, only the 30 % of frames (joint-mean L1) with the largest loss are
-# back-propagated at full weight; the rest at easy_weight (0 = OHEM proper).
+# Why this and not GHM: the GHM run's log (metrics_ghm.csv) showed the top
+# gradient bin (|error| > ~22 deg, 19-27 % of all elements) weighted at
+# 0.12-0.18, i.e. the hard frames were back-propagated at ~1/6 of their L1
+# weight for the whole run; Codabench 17.53 vs 17.23 deg for plain L1. OHEM
+# does the opposite: per batch, frames are ranked by joint-mean L1 and the
+# hardest 30 % are back-propagated at full weight, the rest at 0.1.
+# Base loss is plain L1, so the only change vs st_tcn_pose.yaml is the
+# per-frame weighting. Logged diagnostic: train/loss_ohem_hard_mean (mean L1
+# over the mined frames; it should sit well above train/loss).
 loss:
   =replace=: true
   name: OhemRegressionLoss
@@ -84,6 +91,10 @@ loss:
   select: frame
   base: l1
   weight_in_eval: false
+
+# per-epoch metrics (val/mae, val/mae_subject_std, loss diagnostics) in
+# lightning_logs/version_0/metrics.csv under the run dir
+csv_config: {}
 
 # keep best.ckpt for weight extraction (default True deletes it at run end)
 delete_checkpoints_on_exit: false

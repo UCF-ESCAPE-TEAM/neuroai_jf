@@ -76,18 +76,23 @@ brain_model_config:
 # ---- hard example mining: GHM-R (Li et al. AAAI 2019; Lin et al. MSST 2026) ----
 # Replaces the task's L1Loss. ASL1 base loss, per-element gradient-norm
 # histogram, EMA-smoothed; mean weight 1 so the scale matches L1.
-# mu is in radians and must sit near the model's MEDIAN |error| (R1: 16.6 deg
-# MAE ~ 0.29 rad, median lower). Watch train/loss_ghm_frac_top in the log: if it
-# is > 0.5 mu is too small and nearly everything saturates at g ~ 1.
+# Run 1 (mu 0.1, bins 30): Codabench 17.53 deg vs 17.23 for L1. Its log showed
+# the saturated top bin (g > 0.967, |error| > ~22 deg) holding 19-27 % of the
+# elements at weight 0.12-0.18: GHM treated the hard tail as outliers and
+# down-weighted it ~6x. mu is now set near the model's error scale so that
+# 20-60 deg errors spread over several bins instead of one, and the paper's
+# own regression setting (bins 10, no EMA) is used. Check
+# train/loss_ghm_frac_top in metrics.csv: it should be well under 0.15.
 loss:
   =replace=: true
   name: GhmRegressionLoss
-  mu: 0.1
-  bins: 30
-  momentum: 0.75
+  mu: 0.35
+  bins: 10
+  momentum: 0.0
   normalize_by: nonempty_bins
   weight_in_eval: false
 
-# keep best.ckpt for weight extraction (default True deletes it at run end)
 csv_config: {}
+
+# keep best.ckpt for weight extraction (default True deletes it at run end)
 delete_checkpoints_on_exit: false
