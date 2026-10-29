@@ -1,4 +1,4 @@
-"""Numerical companion to cmixup_tutorial.md. Run: python tutorial/cmixup_demo.py
+"""Numerical companion to training_tutorial.md (Part A). Run: python tutorial/cmixup_demo.py
 
 Part 1  why plain mixup is risky for REGRESSION: the mixed target
         lam*f(x_i) + (1-lam)*f(x_j) is far from f(lam*x_i + (1-lam)*x_j) when
