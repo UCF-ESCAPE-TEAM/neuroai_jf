@@ -16,3 +16,24 @@ data:
   duration: 5.895
 
 delete_checkpoints_on_exit: false
+
+# SLURM resources for NeuralBench-submitted jobs (CLUSTER "slurm"/"auto" in
+# ~/.neuralbench/config.json). Launch from the login node after
+#   module purge && module load anaconda/anaconda-2024.10 && conda activate challenge_2026
+# submitit writes that env's absolute python path into the sbatch script, so no
+# `conda activate` runs in the job. The partition comes from SLURM_PARTITION.
+infra:
+  gpus_per_node: 1
+  tasks_per_node: 1
+  cpus_per_task: 10          # matches N_CPUS (data.num_workers) in config.json
+  mem_gb: 64
+  timeout_min: 1440          # 24 h; `normal` has no partition limit
+  slurm_use_srun: true       # required for tasks_per_node > 1; harmless at 1
+  slurm_additional_parameters:
+    # Keep off the 32-core V100 nodes; Slurm skips down/drained/maint nodes itself.
+    exclude: "evc1,evc2,evc3,evc4,evc5,evc6,evc7,evc8,evc9,evc10,evc11,evc12,evc13,evc15,evc16,evc17,evc18,evc19,evc20,evc21,evc48"
+    mail-type: "END,FAIL"
+    mail-user: "ji045311@ucf.edu"
+  slurm_setup:
+    - "unset OPENBLAS_NUM_THREADS MKL_NUM_THREADS"
+    - "export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK"
