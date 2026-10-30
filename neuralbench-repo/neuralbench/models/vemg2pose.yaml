@@ -16,6 +16,7 @@ data:
   duration: 5.895
 
 delete_checkpoints_on_exit: false
+csv_config: {}
 
 # SLURM resources for NeuralBench-submitted jobs (CLUSTER "slurm"/"auto" in
 # ~/.neuralbench/config.json). Launch from the login node after
