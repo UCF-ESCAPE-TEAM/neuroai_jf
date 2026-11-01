@@ -1,0 +1,14 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+# emg/pose test set restricted to the held-out-stage scenario (emg2pose Table 4,
+# "stage" column): training users performing stages unseen in training.
+# Train and val are unchanged from config.yaml; only the QueryEvents filter
+# that selects the test scenario is overridden.
+data:
+  study:
+    keep_held_out_user_stage_test:
+      query: "split != 'test' or generalization == 'stage'"
