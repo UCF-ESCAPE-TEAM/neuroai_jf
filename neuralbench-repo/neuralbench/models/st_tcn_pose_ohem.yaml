@@ -16,7 +16,7 @@ brain_model_config:
   # Per-window scaling. REQUIRED for Codabench (the server feeds EMG at a
   # different scale than the NeuralBench cache; only a per-window scaling
   # makes the model unit-invariant). R1 (16.60 deg) used zscore / channel.
-  norm: maxabs            # maxabs | minmax | robust | zscore | none
+  norm: minmax            # maxabs | minmax | robust | zscore | none
   scope: channel          # channel | window | batch (batch: experiments only)
   signed: true            # minmax/robust -> [-1, 1] instead of [0, 1]
   robust_q: 0.005         # robust: quantile pair q / 1-q
@@ -26,7 +26,7 @@ brain_model_config:
   # before the FIR. A channel is replaced by the mean of its two ring
   # neighbours when its RMS or its mains-band energy is > mean + n*std across
   # the 16 channels of that window.
-  reject_channels: false    # true to enable (retrain: changes the input)
+  reject_channels: true   # true to enable (retrain: changes the input)
   reject_rms_nstd: 3.0
   reject_mains: 60.0        # 60 Hz mains (US recordings); null disables
   reject_mains_nstd: 3.0
@@ -36,13 +36,13 @@ brain_model_config:
   reject_method: std        # std (mean + n*std, original) | mad (median + n*1.4826*MAD,
                             # robust: still flags two bad channels at once)
   # ---- spatial 2-D CNN (EEGNet-style over the 16-electrode ring) ----
-  f1: 16                # temporal filters (65-tap FIR bank)
+  f1: 32                # temporal filters (65-tap FIR bank)
   k_e: 65
   spatial_mode: conv2d  # conv2d | none   (ring convs between temporal and spatial filter)
   spatial_layers: 2
   k_s: 9
   depth_mult: 2         # spatial filters per temporal map
-  f2: 64
+  f2: 128
   k_sep: 16
   pool1: 5              # 2000 Hz -> 400 Hz
   pool2: 8              # 400 Hz -> 50 Hz feature rate
@@ -50,7 +50,7 @@ brain_model_config:
   # ---- TCN (EEG-TCNet residual dilated blocks at 50 Hz) ----
   tcn_modules: 2
   tcn_blocks: 3         # dilations 1, 2, 4 -> RF 43 steps / module, 85 total (1.7 s)
-  tcn_filters: 64
+  tcn_filters: 128
   tcn_kernel: 4
   tcn_residual: true
   tcn_dropout: 0.2
