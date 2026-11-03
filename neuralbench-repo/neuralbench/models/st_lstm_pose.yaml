@@ -8,14 +8,14 @@ brain_model_config:
   notch_freqs: [60.0, 120.0, 180.0]
   notch_width: 6.0
   bp_taps: null
-  notch_taps: 801           # 3721-tap cascade (1.9 s) instead of 7921
-  norm: zscore              # R1 used zscore / channel; keep it for a like-for-like comparison
+  notch_taps: null           # 3721-tap cascade (1.9 s) instead of 7921
+  norm: minmax              # R1 used zscore / channel; keep it for a like-for-like comparison
   scope: channel
   signed: true
   robust_q: 0.005
   eps: 1.0e-6
   clip: null
-  reject_channels: false
+  reject_channels: true
   reject_rms_nstd: 3.0
   reject_mains: 60.0
   reject_mains_nstd: 3.0
