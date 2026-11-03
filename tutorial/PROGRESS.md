@@ -1,6 +1,6 @@
 # NeurIPS 2026 EEG/EMG Challenge, Track 4 (EMG-to-pose) — team progress
 
-*As of 2026-11-02 (supersedes the 2026-10-31 version). Written for the team and for Claude (Claude Code or claude.ai) picking the work up. Pair it with the `emg-pose-neuralbench-pipeline` skill (`.claude/skills/…/SKILL.md`), which holds the how-to; this file holds the what and the why. Sealed phase is running: 1 submission/day until Nov 21.*
+*As of 2026-11-03 (supersedes the 2026-11-02 version). Written for the team and for Claude (Claude Code or claude.ai) picking the work up. Pair it with the `emg-pose-neuralbench-pipeline` skill (`.claude/skills/…/SKILL.md`), which holds the how-to; this file holds the what and the why. Sealed phase is running: 1 submission/day until Nov 21.*
 
 ## 1. Setting
 
@@ -27,6 +27,8 @@
 | StTcnPoseCMixup | narrow trunk + C-Mixup batches | pending (submission.py in team repo) |
 | StLstmPose L1 variant | `condition_on_pose: false`, `bidirectional: true`, `parameterization: position` (what `st_lstm_pose.yaml` now encodes) | pending |
 | StTcnPose R1 + `min_finite_target_fraction 0.5` | R1 trunk, 1.9× training windows (see §4.12) | **not yet run — top of the queue** |
+| StPoseTransformer | R1 front end + channel gate + multi-scale bank → 4-layer Conformer encoder (50 Hz) → position readout; OHEM, AdamW/OneCycle | not yet run (added Nov 3, `tutorial/transformer_pose_models.md`) |
+| StVelTransformer | same trunk → position + velocity readouts, complementary fusion `fuse_gain 0.1` | not yet run (Nov 3) |
 
 Local numbers for R1: val 0.231 rad, test 0.287 rad (≈16.4°), so the local `user_stage` test split tracks Codabench to within ~0.2° (at the default `min_finite_target_fraction 1.0`).
 
@@ -45,6 +47,8 @@ All in `neuraltrain-repo/neuraltrain/models/` with YAMLs in `neuralbench-repo/ne
 | `st_tcn_pose_cmixup` | same architecture (`StTcnPoseCMixup`), training batches replaced by C-Mixup convex mixes with a pose-similarity kernel (`mix_alpha 2`, `mix_sigma 0.5 rad`, cross-user pairs forced, mixing after the front end). Weights load into the plain StTcnPose submission. | trained/submitted, score pending |
 | `st_tcn_pose_ghm` / `st_tcn_pose_ohem` | StTcnPose with `loss:` replaced by `GhmRegressionLoss` or `OhemRegressionLoss` (`neuraltrain/losses/hard_example.py`) | GHM run 1 done (worse); run 2 + OHEM pending |
 | **`st_lstm_pose`** | same trunk → 1×1 to 64 → LSTM decoder (2 layers, hidden 256, hybrid/velocity/position heads, `output_scalar 0.01`); `condition_on_pose` toggles VEMG2Pose-style pose feedback (sequential, ~20× slower) vs one vectorised `nn.LSTM` call that can be bidirectional | v1 17.06; L1 variant pending |
+| `st_pose_transformer` | R1 front end → optional SE gate over the 16 electrodes (`channel_attention`) → SpatialBlock with an optional multi-scale temporal bank (`ms_kernels` 15/31/63/127 taps, MSST idea at 2 kHz) → `SequenceEncoder` (4 × pre-norm Conformer blocks, d 128, 4 heads, RoPE, 300 ms conv module; `block_style: transformer` / `attn_window` / `causal` switches) → 1×1 position readout. 1.6 M params. Every addition is a YAML switch back to the R1 trunk. | code + YAML + tests, Nov 3; not trained |
+| `st_vel_transformer` | same trunk → `VelocityDecoder`: position + velocity readouts, VEMG2Pose hybrid integration with a complementary filter (`fuse_gain`: 0 = pure integration, 1 = position readout) and an optional GRU state on the velocity head (`vel_gru_hidden`). Isolates the decoder question (smoothness vs anchoring) that StLstmPose v1 confounded with its causal encoder. | code + YAML + tests, Nov 3; not trained |
 
 **Caution on the YAMLs (still true on `157826c`):** `st_tcn_pose.yaml`, `_ghm`, `_ohem` and `_cmixup` carry the *original* widths (`f1 16, f2 64, tcn_filters 64`) and `norm: maxabs`, not R1's (`32/128/128`, `zscore`). Only `st_lstm_pose.yaml` has the R1 trunk. Any run meant to compare against R1 needs those four values set explicitly, and `extract_weights_rev1.py` must point at the YAML that was actually trained.
 
@@ -96,9 +100,10 @@ All YAML-only; every change alters the config hash, so rerun with `-f`.
 3. **Bring the training-side YAMLs up to the R1 trunk** (widths 32/128/128, `norm: zscore`) so loss/mixup effects are measured against the 16.60° model, not the 17.23° one.
 4. **Split the test number by generalisation axis**: rerun the scored checkpoints with `--dataset heldout_user` and `--dataset heldout_stage` (no retraining needed if the cache is intact — the same config hash plus a dataset suffix). If "stage" dominates the error, item 2 is the right lever; if "user", C-Mixup/augmentation is.
 5. **R3** — StTcnPose `head_kind: velocity` (then `smooth`): explicit frame coupling without recurrence.
-6. **Combine** the 0.5 threshold + C-Mixup + the better of GHM-2/OHEM (append the `loss:` block to the cmixup YAML), then stronger augmentation (`band_offsets ±2`, gain jitter, channel dropout).
-7. **Ensemble** R1 + best training-side variant (+ seeds); error types differ (local jitter vs slow drift).
-8. **Audit package**: fork commit hash, YAML, seed and `extract_weights` summary with every uploaded zip.
+6. **Transformer trunk + decoder ablation** (`tutorial/transformer_pose_models.md` §4): P vs V0 vs V1 on `--dataset heldout_user` first, against an R1+OHEM baseline trained with the same AdamW/OneCycle block; only the winner goes to Codabench. If P ≈ baseline, stop here and spend uploads on training/data.
+7. **Combine** the 0.5 threshold + C-Mixup + the better of GHM-2/OHEM (append the `loss:` block to the cmixup YAML), then stronger augmentation (`band_offsets ±2`, gain jitter, channel dropout).
+8. **Ensemble** R1 + best training-side variant (+ seeds); error types differ (local jitter vs slow drift).
+9. **Audit package**: fork commit hash, YAML, seed and `extract_weights` summary with every uploaded zip.
 
 ## 8. Open questions
 

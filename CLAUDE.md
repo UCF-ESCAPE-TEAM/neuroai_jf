@@ -6,9 +6,10 @@ Working branch: `emg-pose-cnn`. Upstream: `facebookresearch/neuroai` (keep our c
 - `tutorial/PROGRESS.md` — scoreboard, what has been tried, lessons, ranked plan, and a list of tasks worth automating (§9). Update it when a run scores or a decision changes.
 - `.claude/skills/emg-pose-neuralbench-pipeline/SKILL.md` — the how-to: register a model, train (local / SLURM / `--dataset heldout_user|heldout_stage`), read a run out, extract `weights.pt`, write and test `submission.py`.
 - `tutorial/training_tutorial.md`, `tutorial/cmixup_tutorial.md` — why we are working on training/data rather than architecture.
+- `tutorial/transformer_pose_models.md` — the Conformer-encoder models (`st_pose_transformer`, `st_vel_transformer`): architecture, rationale, ablation plan.
 
 ## Layout
-- `neuraltrain-repo/neuraltrain/models/` — our models: `emg_frontend.py`, `st_tcn_pose.py` (best, R1 = 16.60° Codabench), `st_tcn_pose_cmixup.py`, `st_lstm_pose.py`, `neuraldrive_pose.py`, `ulhm_pose.py`. Register new ones in `models/__init__.py`.
+- `neuraltrain-repo/neuraltrain/models/` — our models: `emg_frontend.py`, `st_tcn_pose.py` (best, R1 = 16.60° Codabench), `st_tcn_pose_cmixup.py`, `st_lstm_pose.py`, `st_pose_transformer.py`, `st_vel_transformer.py`, `neuraldrive_pose.py`, `ulhm_pose.py`. Register new ones in `models/__init__.py`.
 - `neuraltrain-repo/neuraltrain/losses/hard_example.py` — GHM-R / OHEM losses.
 - `neuralbench-repo/neuralbench/models/*.yaml` — training configs (YAML stem = CLI name). `tasks/emg/pose/config.yaml` is the task; `tasks/emg/pose/datasets/` holds test-set variants.
 - Submission packaging lives in the sibling repo `UCF-ESCAPE-TEAM/NIPS_CHALLENGE_2026` (`submission/<model>/submission.py`, `prepare_submission/extract_weights_rev1.py`, `shell/run_submissions.sh`).
