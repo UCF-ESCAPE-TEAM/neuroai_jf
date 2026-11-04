@@ -1,0 +1,36 @@
+{
+  "// how to use": "Copy to ~/.neuralbench/config.json on Newton and replace every <NID> with your login (e.g. ha399973). NeuralBench reads only the named keys below (config_manager.py); the '// ...' keys are comments and are ignored, so they may stay or go.",
+
+  "// USER": "your Newton login (NID). Only used to name log folders and the W&B run; no effect on results.",
+  "USER": "<NID>",
+
+  "// ENTITY_NAME": "W&B entity. We do not use W&B (WANDB_HOST empty), so just repeat the NID.",
+  "ENTITY_NAME": "<NID>",
+
+  "// PROJECT_NAME": "W&B project name. Leave as 'neuralbench'.",
+  "PROJECT_NAME": "neuralbench",
+
+  "// SLURM_PARTITION": "Partition for every submitted job (#SBATCH --partition). 'normal' has no wall-time limit on Newton; 'short' would reject the 48 h timeout_min in the *_newton YAMLs. Leave empty on a machine without SLURM.",
+  "SLURM_PARTITION": "normal",
+
+  "// SLURM_CONSTRAINT": "#SBATCH --constraint. Leave empty; the *_newton YAMLs pin nodes with infra.slurm_additional_parameters.exclude instead.",
+  "SLURM_CONSTRAINT": "",
+
+  "// N_CPUS": "Dataloader workers per process (data.num_workers). Keep equal to infra.cpus_per_task in the *_newton YAMLs (10).",
+  "N_CPUS": 10,
+
+  "// CLUSTER": "'auto' = submit through SLURM when sinfo is available, else run locally. Use null only inside a hand-written sbatch script (see tutorial/neuralbench_slurm_infra.md).",
+  "CLUSTER": "auto",
+
+  "// CACHE_DIR": "Preprocessing cache (study parquet, EMG and joint caches, ~400 GB for emg2pose). Shared, already filled; read access is enough once it is complete, but NeuralBench will try to write there for any recording that is missing.",
+  "CACHE_DIR": "/lustre/fs1/home/ji045311/challenge_2026/Cache",
+
+  "// SAVE_DIR": "Run folders (checkpoints, metrics.csv, sbatch logs). Must be writable by you: put it in your own home, replacing <NID>. It is created on first use.",
+  "SAVE_DIR": "/lustre/fs1/home/<NID>/challenge_2026/Result",
+
+  "// DATA_DIR": "Parent of the BIDS dataset folder: NeuralBench expects <DATA_DIR>/Salter2024Emg2pose/... Shared, read-only is fine.",
+  "DATA_DIR": "/lustre/fs1/home/ji045311/challenge_2026/Data",
+
+  "// WANDB_HOST": "Weights & Biases server URL. Empty disables W&B logging (what we do everywhere).",
+  "WANDB_HOST": ""
+}
