@@ -1,0 +1,167 @@
+brain_model_config:
+  =replace=: true
+  name: "StPoseTransformer"
+  # ======================================================================
+  # Front end (EmgPreproc, no parameters) -- identical to StTcnPose R1.
+  # One scipy FIR: band-pass l_freq-h_freq + a band-stop per notch, zero phase.
+  # ======================================================================
+  sfreq: 2000.0
+  l_freq: 20.0
+  h_freq: 450.0
+  notch_freqs: [60.0, 120.0, 180.0]
+  notch_width: 6.0
+  bp_taps: null
+  notch_taps: null
+  # Per-window scaling is REQUIRED for Codabench (server feeds EMG at another
+  # scale). R1 (16.60 deg) used zscore / channel; kept for a like-for-like trunk.
+  norm: zscore
+  scope: channel
+  signed: true
+  robust_q: 0.005
+  eps: 1.0e-6
+  clip: null
+  # per-window bad-channel rejection + ring interpolation (your item 1)
+  reject_channels: true
+  reject_rms_nstd: 3.0
+  reject_mains: 60.0
+  reject_mains_nstd: 3.0
+  reject_mains_bw: 2.0
+  reject_segment: 400
+  reject_max_frac: 0.5
+  reject_method: std
+  # ======================================================================
+  # Channel attention: SE gate over the 16 electrodes from per-window log-RMS
+  # and log-MAV. Identity at init (last layer zeroed), ~1.2k parameters.
+  # ======================================================================
+  channel_attention: true
+  ca_hidden: 32
+  # ======================================================================
+  # Spatial block (R1 trunk: f1 32, f2 128) with a multi-scale temporal bank.
+  # ms_kernels replaces the single 65-tap bank: f1 is split evenly over the
+  # kernel lengths (32 / 4 = 8 filters each). At 2 kHz, 15/31/63/127 taps =
+  # 7.5/15/31/63 ms -- short bursts to slow envelopes. Set ms_kernels: null
+  # to get R1's single k_e bank back (ablation A below).
+  # ======================================================================
+  f1: 32
+  k_e: 65
+  ms_kernels: [15, 31, 63, 127]
+  spatial_mode: conv2d
+  spatial_layers: 2
+  k_s: 9
+  depth_mult: 2
+  f2: 128
+  k_sep: 16
+  pool1: 5              # 2000 Hz -> 400 Hz
+  pool2: 8              # 400 Hz -> 50 Hz: one encoder token per 20 ms frame
+  spatial_dropout: 0.2
+  # ======================================================================
+  # Sequence encoder at 50 Hz (250 tokens per 5-s window).
+  # Conformer blocks: 1/2 FFN -> MHSA (rotary positions) -> depthwise conv
+  # (15 frames = 300 ms) -> 1/2 FFN, all pre-norm. 4 x 128-d, 4 heads,
+  # ~0.9 M parameters in the encoder; replaces the TCN (2 x 3 dilated blocks,
+  # RF 1.7 s) with full-window context.
+  # block_style: transformer drops the conv module and the macaron FFN
+  # (plain pre-norm transformer). attn_window: 25 would limit attention to
+  # +-0.5 s (causal: the last 0.5 s).
+  # ======================================================================
+  d_model: 128
+  n_heads: 4
+  n_layers: 4
+  ff_mult: 4
+  enc_dropout: 0.1
+  attn_dropout: 0.1
+  block_style: conformer
+  conv_kernel: 15
+  pos_enc: rope
+  attn_window: null
+  # ======================================================================
+  # Head: absolute joint angle per frame (no continuity prior, no drift).
+  # smooth: + learnable 5-tap depthwise filter per joint (moving average at init)
+  # ======================================================================
+  head_kind: linear
+  head_smooth_k: 5
+  # ======================================================================
+  # Causality. false = offline / bidirectional (what the competition allows and
+  # what scores best). true = left-padded convs, expanding-window scaling,
+  # causal attention mask, zero-order-hold upsampling.
+  # ======================================================================
+  causal: false
+
+# ======================================================================
+# Loss: plain L1 (the task default, no hard-example mining). This is the
+# control for the OHEM and GHM variants of st_pose_transformer.yaml; nothing else differs.
+# ======================================================================
+loss:
+  =replace=: true
+  name: L1Loss
+
+# ======================================================================
+# Optimiser: transformers want AdamW + warmup, not the task's constant Adam
+# 1e-3. OneCycleLR: 10 % linear warmup to max_lr, cosine decay to ~0
+# (total_steps is injected by the trainer). Weight decay 0.05 regularises the
+# attention/FFN matrices; clip at 1.0 keeps early steps stable.
+# ======================================================================
+lightning_optimizer_config:
+  =replace=: true
+  optimizer:
+    name: AdamW
+    lr: 3.0e-4
+    kwargs:
+      weight_decay: 0.05
+      betas: [0.9, 0.98]
+  scheduler:
+    name: OneCycleLR
+    kwargs:
+      max_lr: 3.0e-4
+      pct_start: 0.1
+      anneal_strategy: cos
+      div_factor: 25.0
+      final_div_factor: 100.0
+  interval: step
+trainer_config:
+  gradient_clip_val: 1.0
+
+# ======================================================================
+# Ablation plan (one change per run, evaluate with --dataset heldout_user
+# before spending a Codabench upload):
+#   A  ms_kernels: null           -> single 65-tap bank (is the multi-scale bank worth it?)
+#   B  channel_attention: false   -> no electrode gate
+#   C  block_style: transformer   -> is the conv module / macaron FFN doing the work?
+#   D  n_layers: 2 / 6            -> depth
+#   E  attn_window: 25            -> is full-window context needed?
+# The honest baseline is StTcnPose R1 + OHEM (st_tcn_pose_ohem.yaml with the R1
+# widths) trained with THIS optimiser block.
+# ======================================================================
+
+# per-epoch metrics in lightning_logs/version_0/metrics.csv under the run dir
+csv_config: {}
+# keep best.ckpt for weight extraction
+delete_checkpoints_on_exit: false
+
+# ======================================================================
+# Newton (UCF GPU cluster) SLURM resources -- from tutorial/neuralbench_slurm_infra.md.
+# Top-level `infra:` merges key by key into neuralbench/defaults/config.yaml
+# and is NOT part of the cache key, so this file shares results with the
+# non-_newton YAML of the same name. 2 GPUs, DDP (one process per GPU):
+# data.batch_size (128) is per device, so the effective batch is 256.
+# Launch from a compute node, never evuser2:
+#   srun -p short --pty bash
+#   module purge && module load anaconda/anaconda-2024.10 && conda activate challenge_2026
+#   export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+#   neuralbench emg pose -m <this file's stem>      # inside tmux; -r retries a failed job
+# Do not put `module purge` in slurm_setup (the anaconda modulefile loops on unload).
+# ======================================================================
+infra:
+  gpus_per_node: 2
+  tasks_per_node: 2          # one process per GPU; needs slurm_use_srun: true
+  cpus_per_task: 10          # keep equal to N_CPUS (data.num_workers) in ~/.neuralbench/config.json
+  mem_gb: 64
+  timeout_min: 1440          # 24 h; `normal` has no partition limit
+  slurm_use_srun: true
+  slurm_additional_parameters:
+    exclude: "evc[1-13,15-21,26]"   # stay on evc22-50
+    mail-type: "END,FAIL"
+    mail-user: "ji045311@ucf.edu"
+  slurm_setup:
+    - "unset OPENBLAS_NUM_THREADS MKL_NUM_THREADS"
+    - "export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK"

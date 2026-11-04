@@ -22,4 +22,5 @@ Working branch: `emg-pose-cnn`. Upstream: `facebookresearch/neuroai` (keep our c
 - `extract_weights_rev1.py` must be pointed at the YAML that was actually trained.
 - Sealed phase: 1 Codabench upload per day until Nov 21 2026. Record commit hash + YAML + seed with every zip (top-3 audit).
 - On the SLURM cluster never launch from the login node; `module purge` before `sbatch`.
+- On Newton use the `*_newton.yaml` configs (they carry the `infra:` SLURM block; `tutorial/neuralbench_slurm_infra.md` explains the keys).
 - Don't edit the benchopt harness (`2026-competition`) — disqualification.

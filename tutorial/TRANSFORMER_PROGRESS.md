@@ -1,13 +1,13 @@
 # Transformer models for EMG-to-pose: progress and handoff
 
-*Status as of 2026-11-03 21:50 ET, commit `ea85c5c`+ (loss variants added) on `UCF-ESCAPE-TEAM/neuroai_jf`, branch `emg-pose-cnn`. Written so a teammate can pick this thread up in Claude Code. Read `CLAUDE.md` first, then this file, then `tutorial/transformer_pose_models.md` for the design rationale. The how-to for training / weights / submission is the `emg-pose-neuralbench-pipeline` skill (`.claude/skills/emg-pose-neuralbench-pipeline/SKILL.md`). Update this file whenever a run scores or a decision changes.*
+*Status as of 2026-11-03 21:50 ET, commit `e2693a5`+ (loss variants and _newton cluster YAMLs added) on `UCF-ESCAPE-TEAM/neuroai_jf`, branch `emg-pose-cnn`. Written so a teammate can pick this thread up in Claude Code. Read `CLAUDE.md` first, then this file, then `tutorial/transformer_pose_models.md` for the design rationale. The how-to for training / weights / submission is the `emg-pose-neuralbench-pipeline` skill (`.claude/skills/emg-pose-neuralbench-pipeline/SKILL.md`). Update this file whenever a run scores or a decision changes.*
 
 ## 1. Where this stands
 
 | Step | State |
 |---|---|
 | Models `StPoseTransformer`, `StVelTransformer` written and registered | **done** (`neuraltrain-repo/neuraltrain/models/st_pose_transformer.py`, `st_vel_transformer.py`, `__init__.py`) |
-| Training YAMLs | **done** — six: `st_pose_transformer{,_ghm,_l1}.yaml`, `st_vel_transformer{,_ghm,_l1}.yaml` in `neuralbench-repo/neuralbench/models/` (OHEM / GHM-R run-2 setting / plain L1; identical otherwise) |
+| Training YAMLs | **done** — six (+ six `_newton` twins with the Newton 2-GPU `infra:` block, see `tutorial/neuralbench_slurm_infra.md`): `st_pose_transformer{,_ghm,_l1}.yaml`, `st_vel_transformer{,_ghm,_l1}.yaml` in `neuralbench-repo/neuralbench/models/` (OHEM / GHM-R run-2 setting / plain L1; identical otherwise) |
 | Unit tests | **done, passing** (`neuraltrain/models/test_st_transformer_pose.py`, 9 tests, ~5 s on CPU) |
 | CPU smoke test on `(8, 16, 10000)` → `(8, 10000, 20)` | **done** (both models; finite, non-constant, strict state-dict round trip, causal variant verified) |
 | `--debug` run on real data | **not done** |
@@ -33,12 +33,14 @@ Each step is something you can hand to Claude Code as-is. Record results in §5 
 
 1. **Debug run on the cluster** (10 min). From an interactive compute node (never the login node), `module purge`, activate `challenge_2026`, then
    ```bash
-   neuralbench emg pose -m st_pose_transformer --debug
-   neuralbench emg pose -m st_vel_transformer --debug
+   neuralbench emg pose -m st_pose_transformer_newton --debug
+   neuralbench emg pose -m st_vel_transformer_newton --debug
    ```
+   On Newton always use the `_newton` stems: they carry the SLURM `infra:` block (2 GPUs, DDP, 24 h, evc22-50, mail on END/FAIL). The non-`_newton` files are for a local machine or a hand-written sbatch with `CLUSTER: null`. `--debug` forces 1 GPU.
    Pass criterion: the run reaches the validate table and one epoch without an error. Likely failure points: a config key the installed NeuralBench build rejects (then check `pip show neuraltrain` points into the clone, re-`pip install -e`), or OneCycleLR complaining about `total_steps` (it is injected from `estimated_stepping_batches` in `neuralbench/pl_module.py`; if the debug trainer gives 0 steps, run without `--debug` and `-f`).
 2. **Baseline with the new optimiser.** The transformer YAMLs change the optimiser, so R1 + OHEM must be re-run with the same block or the comparison is confounded. Make `st_tcn_pose_ohem_adamw.yaml`: copy `st_tcn_pose_ohem.yaml`, confirm the R1 widths (`f1 32, f2 128, tcn_filters 128, norm zscore`), and paste in the `lightning_optimizer_config` + `trainer_config` blocks from `st_pose_transformer.yaml`. Train it.
 3. **Full runs.** Two groups, submit each group to SLURM in one go (2 GPUs/node, ~0.3 h/epoch for R1; expect similar or slower). Seed 33 only (the grid is trimmed).
+   - On Newton, append `_newton` to every stem below (e.g. `-m st_pose_transformer_newton`). The effective batch is 2 × 128 with DDP; the OneCycle `max_lr 3e-4` was set with that in mind, so do not halve it.
    - *Encoder/decoder question* (OHEM everywhere): P = `st_pose_transformer`; V0 = `st_vel_transformer` with `fuse_gain: 0.0` (make `st_vel_transformer_g0.yaml` by copying the base file); V1 = `st_vel_transformer`.
    - *Loss question* (same model, three losses): `st_pose_transformer_l1`, `st_pose_transformer_ghm`, and `st_vel_transformer_l1`, `st_vel_transformer_ghm`. Together with the base files that is a 2 × 3 grid; the L1 runs are the controls. The earlier OHEM > L1 > GHM ranking was measured on StTcnPose with constant Adam 1e-3, so it is not known to carry over to a transformer trunk under AdamW + warmup, which is why all three are re-run here rather than assumed.
    - If GPU time is short, run order: P-OHEM, P-L1, V1-OHEM, V1-L1, then V0, then the two GHM runs (GHM lost on the TCN; it is here to confirm, not to win).
@@ -88,6 +90,8 @@ neuraltrain-repo/neuraltrain/models/__init__.py              two registration li
 neuralbench-repo/neuralbench/models/st_pose_transformer.yaml
 neuralbench-repo/neuralbench/models/st_vel_transformer.yaml
 neuralbench-repo/neuralbench/models/st_{pose,vel}_transformer_{ghm,l1}.yaml   loss variants (only the loss: block differs)
+neuralbench-repo/neuralbench/models/st_*_transformer*_newton.yaml           same six + Newton `infra:` block (2 GPUs, DDP)
+tutorial/neuralbench_slurm_infra.md                           what every infra: key does, how to launch
 tutorial/transformer_pose_models.md                          design + rationale + ablation plan
 tutorial/TRANSFORMER_PROGRESS.md                             this file
 tutorial/PROGRESS.md                                         team-wide scoreboard (rows added for both models)
