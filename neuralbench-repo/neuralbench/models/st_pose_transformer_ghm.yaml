@@ -127,6 +127,8 @@ lightning_optimizer_config:
   interval: step
 trainer_config:
   gradient_clip_val: 1.0
+  n_epochs: 40
+  patience: 15
 
 # ======================================================================
 # Ablation plan (one change per run, evaluate with --dataset heldout_user

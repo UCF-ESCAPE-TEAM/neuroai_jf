@@ -120,6 +120,8 @@ lightning_optimizer_config:
   interval: step
 trainer_config:
   gradient_clip_val: 1.0
+  n_epochs: 40
+  patience: 15
 
 # ======================================================================
 # Ablation plan (one change per run, evaluate with --dataset heldout_user
@@ -137,3 +139,9 @@ trainer_config:
 csv_config: {}
 # keep best.ckpt for weight extraction
 delete_checkpoints_on_exit: false
+
+# DGX Spark single-GPU run: batch 256 = Newton effective batch (2 x 128); 72 h.
+data:
+  batch_size: 256
+infra:
+  timeout_min: 4320

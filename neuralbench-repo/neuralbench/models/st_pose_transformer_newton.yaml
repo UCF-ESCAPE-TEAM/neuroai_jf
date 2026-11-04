@@ -125,6 +125,8 @@ lightning_optimizer_config:
   interval: step
 trainer_config:
   gradient_clip_val: 1.0
+  n_epochs: 40
+  patience: 15
 
 # ======================================================================
 # Ablation plan (one change per run, evaluate with --dataset heldout_user
@@ -161,7 +163,7 @@ infra:
   tasks_per_node: 2          # one process per GPU; needs slurm_use_srun: true
   cpus_per_task: 10          # keep equal to N_CPUS (data.num_workers) in ~/.neuralbench/config.json
   mem_gb: 64
-  timeout_min: 1440          # 24 h; `normal` has no partition limit
+  timeout_min: 2880          # 48 h; `normal` has no partition limit
   slurm_use_srun: true
   slurm_additional_parameters:
     exclude: "evc[1-13,15-21,26]"   # stay on evc22-50
