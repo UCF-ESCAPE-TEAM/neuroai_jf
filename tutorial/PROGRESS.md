@@ -29,6 +29,7 @@
 | StTcnPose R1 + `min_finite_target_fraction 0.5` | R1 trunk, 1.9× training windows (see §4.12) | **not yet run — top of the queue** |
 | StPoseTransformer | R1 front end + channel gate + multi-scale bank → 4-layer Conformer encoder (50 Hz) → position readout; OHEM, AdamW/OneCycle | not yet run (added Nov 3, `tutorial/transformer_pose_models.md`) |
 | StVelTransformer | same trunk → position + velocity readouts, complementary fusion `fuse_gain 0.1` | not yet run (Nov 3) |
+| StPoseTransformer / StVelTransformer `_ghm`, `_l1` | same models, GHM-R (run-2 setting) and plain-L1 controls — a 2 models × 3 losses grid | YAMLs on branch (Nov 3); not run |
 
 Local numbers for R1: val 0.231 rad, test 0.287 rad (≈16.4°), so the local `user_stage` test split tracks Codabench to within ~0.2° (at the default `min_finite_target_fraction 1.0`).
 

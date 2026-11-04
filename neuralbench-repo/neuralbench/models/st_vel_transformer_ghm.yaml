@@ -1,0 +1,119 @@
+brain_model_config:
+  =replace=: true
+  name: "StVelTransformer"
+  # ======================================================================
+  # Front end, channel gate, spatial block and encoder: IDENTICAL to
+  # st_pose_transformer.yaml, so a pose-vs-velocity comparison isolates the
+  # decoder. Keep the two files in sync when the trunk changes.
+  # ======================================================================
+  sfreq: 2000.0
+  l_freq: 20.0
+  h_freq: 450.0
+  notch_freqs: [60.0, 120.0, 180.0]
+  notch_width: 6.0
+  bp_taps: null
+  notch_taps: null
+  norm: zscore
+  scope: channel
+  signed: true
+  robust_q: 0.005
+  eps: 1.0e-6
+  clip: null
+  reject_channels: true
+  reject_rms_nstd: 3.0
+  reject_mains: 60.0
+  reject_mains_nstd: 3.0
+  reject_mains_bw: 2.0
+  reject_segment: 400
+  reject_max_frac: 0.5
+  reject_method: std
+  channel_attention: true
+  ca_hidden: 32
+  f1: 32
+  k_e: 65
+  ms_kernels: [15, 31, 63, 127]
+  spatial_mode: conv2d
+  spatial_layers: 2
+  k_s: 9
+  depth_mult: 2
+  f2: 128
+  k_sep: 16
+  pool1: 5
+  pool2: 8
+  spatial_dropout: 0.2
+  d_model: 128
+  n_heads: 4
+  n_layers: 4
+  ff_mult: 4
+  enc_dropout: 0.1
+  attn_dropout: 0.1
+  block_style: conformer
+  conv_kernel: 15
+  pos_enc: rope
+  attn_window: null
+  # ======================================================================
+  # Velocity decoder (VEMG2Pose hybrid parameterisation + complementary fusion)
+  #   pose_t = position_t                                          t <  position_steps
+  #   pose_t = (1-g) * (pose_{t-1} + vel_scale * velocity_t) + g * position_t   otherwise
+  # position_steps 12 frames = 240 ms (VEMG2Pose: 250 ms).
+  # vel_scale 0.02 rad/frame per unit readout = 1 rad/s at 50 Hz per unit.
+  # fuse_gain g: 0 = pure integration (drifts, VEMG2Pose w/o LSTM);
+  #              1 = pure position readout (== st_pose_transformer);
+  #              0.1 = the position head corrects ~10 %/frame, i.e. drift is
+  #              forgotten with a ~10-frame (200 ms) time constant while the
+  #              velocity head still shapes everything faster than that.
+  # vel_gru_hidden: >0 puts a GRU (one vectorised call, causal state) in front
+  #              of the velocity readout -- the "LSTM state" argument from
+  #              VEMG2Pose without pose feedback or a per-frame Python loop.
+  # ======================================================================
+  position_steps: 12
+  vel_scale: 0.02
+  fuse_gain: 0.1
+  vel_gru_hidden: 0
+  vel_gru_layers: 1
+  causal: false
+
+# Loss: GHM-R, run-2 setting (mu 0.35, 10 bins, no EMA) as in st_pose_transformer_ghm.yaml.
+# Mining weights are computed on the error of the INTEGRATED pose (the model
+# output). Only the loss differs from st_vel_transformer.yaml.
+loss:
+  =replace=: true
+  name: GhmRegressionLoss
+  mu: 0.35
+  bins: 10
+  momentum: 0.0
+  normalize_by: nonempty_bins
+  weight_in_eval: false
+
+lightning_optimizer_config:
+  =replace=: true
+  optimizer:
+    name: AdamW
+    lr: 3.0e-4
+    kwargs:
+      weight_decay: 0.05
+      betas: [0.9, 0.98]
+  scheduler:
+    name: OneCycleLR
+    kwargs:
+      max_lr: 3.0e-4
+      pct_start: 0.1
+      anneal_strategy: cos
+      div_factor: 25.0
+      final_div_factor: 100.0
+  interval: step
+trainer_config:
+  gradient_clip_val: 1.0
+
+# ======================================================================
+# Decoder ablation (same trunk, same optimiser):
+#   V0  fuse_gain: 0.0                     pure velocity integration
+#   V1  fuse_gain: 0.1  (this file)        complementary fusion
+#   V2  fuse_gain: 0.1, vel_gru_hidden: 128 + recurrent state on the velocity head
+#   P   st_pose_transformer.yaml           pure position readout
+# Expected ranking V1/V2 > P > V0; the P-vs-V0 gap says how much the metric
+# rewards smoothness vs anchoring. If V0 ~ P the decoder is not the bottleneck.
+# ======================================================================
+
+csv_config: {}
+delete_checkpoints_on_exit: false
