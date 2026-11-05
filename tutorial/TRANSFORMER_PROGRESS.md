@@ -12,7 +12,7 @@
 | CPU smoke test on `(8, 16, 10000)` → `(8, 10000, 20)` | **done** (both models; finite, non-constant, strict state-dict round trip, causal variant verified) |
 | `--debug` run on real data | **not done** |
 | Full training runs (baseline, P×3 losses, V0, V1×3 losses) | **not started** |
-| Codabench `submission.py` for either model | **not written** |
+| Codabench `submission.py` | **done** — `NIPS_CHALLENGE_2026/submission/st_{pose,vel}_transformer{,_ghm,_l1}/submission.py` (commit `ef4da53`), verified strict-load + output match against the fork models @ `cc2ecea`+ |
 | Weight extraction / zip | **not done** |
 
 Nothing has been trained. Every number in this file is a design choice, not a result.
@@ -46,7 +46,7 @@ Each step is something you can hand to Claude Code as-is. Record results in §5 
    - If GPU time is short, run order: P-OHEM, P-L1, V1-OHEM, V1-L1, then V0, then the two GHM runs (GHM lost on the TCN; it is here to confirm, not to win).
 4. **Read the runs out locally before Codabench.** For each: `best.ckpt` epoch, `val/mae`, `test/mae` on the default `user_stage` split, and `--dataset heldout_user` / `--dataset heldout_stage` (same config hash + dataset suffix, no retraining). Compare against R1 local: val 0.231 rad, test 0.287 rad. One sealed upload per day, so pick the order from local test MAE.
 5. **Decide.** If P ≈ baseline (within ~0.2°), the TCN's inductive bias is adequate: stop the encoder work and put uploads into training/data (`min_finite_target_fraction 0.5`, C-Mixup) per `PROGRESS.md` §7. If P or V1 wins, run ablations A–E from `transformer_pose_models.md` §4 on the winner, one at a time.
-6. **Submission files** (only for whatever goes to Codabench). In `NIPS_CHALLENGE_2026/submission/st_pose_transformer/` (or `st_vel_transformer/`): `submission.py` per the skill's template, with verbatim copies of `_same_pad`, `_RingConv2d`, `SpatialBlock`, `_MultiScaleTemporal`, `MsSpatialBlock`, `ChannelGate`, `_rotary`, `_rotary_tables`, `_sinusoid`, `attention_mask`, `_SelfAttention`, `_FeedForward`, `_ConvModule`, `EncoderBlock`, `SequenceEncoder`, `upsample_frames`, plus `PosePost` (pose) or `VelocityDecoder` (velocity), and the `*Model` class. `CONFIG` = the YAML's `brain_model_config` minus `name`. `Solver.name = "StPoseTransformer"` / `"StVelTransformer"`. Then `extract_weights_rev1.py` pointed at the YAML actually trained, and `run_submissions.sh` with `--only`. Do the four checks in the skill §3 (strict load, non-constant output, raw-ckpt load, timing).
+6. **Submission.** `submission.py` already exists for all six configs in `NIPS_CHALLENGE_2026/submission/<stem>/` (Solver names `StPoseTransformer{,Ghm,L1}`, `StVelTransformer{,Ghm,L1}`). Per run: `extract_weights_rev1.py` with `CKPT_PATH` = the run's `best.ckpt`, `CONFIG_YAML` = the YAML actually trained (the `_newton` one on Newton), `OUT_PATH` = `submission/<stem>/weights.pt`; then `run_submissions.sh submission /path/to/2026-competition --only <stem>`. If the model code in the fork changes, regenerate the six scripts (the classes must stay verbatim) and re-run the strict-load check.
 
 ## 4. Decisions already made, and why
 
