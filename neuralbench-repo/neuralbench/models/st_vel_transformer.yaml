@@ -29,14 +29,14 @@ brain_model_config:
   reject_method: std
   channel_attention: true
   ca_hidden: 32
-  f1: 32
+  f1: 64
   k_e: 65
   ms_kernels: [15, 31, 63, 127]
   spatial_mode: conv2d
   spatial_layers: 2
   k_s: 9
   depth_mult: 2
-  f2: 128
+  f2: 256
   k_sep: 16
   pool1: 5
   pool2: 8
