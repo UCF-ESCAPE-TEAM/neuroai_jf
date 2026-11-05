@@ -8,6 +8,7 @@
 |---|---|
 | Models `StPoseTransformer`, `StVelTransformer` written and registered | **done** (`neuraltrain-repo/neuraltrain/models/st_pose_transformer.py`, `st_vel_transformer.py`, `__init__.py`) |
 | Training YAMLs | **done** — six (+ six `_newton` twins with the Newton 2-GPU `infra:` block, see `tutorial/neuralbench_slurm_infra.md`): `st_pose_transformer{,_ghm,_l1}.yaml`, `st_vel_transformer{,_ghm,_l1}.yaml` in `neuralbench-repo/neuralbench/models/` (OHEM / GHM-R run-2 setting / plain L1; identical otherwise) |
+| `emg_vel_transformer` (raw-signal channel gate) | **code + YAML (+`_newton`) + 8 tests, Nov 5; not trained.** `StVelTransformer` with `ChannelGate` replaced by `RawChannelGate`: learned squeeze (bank of `gate_n_feat` temporal filters shared across electrodes, squared, time-averaged, log) instead of log-RMS/log-MAV; excitation `gate_excite: mlp` (SE) or `eca` (1-D conv over the electrode ring). Identity at init; `channel_attention: false` makes it == StVelTransformer. 1.84 M params. Compare against `st_vel_transformer` with everything else equal (ablation B′). |
 | Unit tests | **done, passing** (`neuraltrain/models/test_st_transformer_pose.py`, 9 tests, ~5 s on CPU) |
 | CPU smoke test on `(8, 16, 10000)` → `(8, 10000, 20)` | **done** (both models; finite, non-constant, strict state-dict round trip, causal variant verified) |
 | `--debug` run on real data | **not done** |
@@ -90,6 +91,8 @@ neuraltrain-repo/neuraltrain/models/__init__.py              two registration li
 neuralbench-repo/neuralbench/models/st_pose_transformer.yaml
 neuralbench-repo/neuralbench/models/st_vel_transformer.yaml
 neuralbench-repo/neuralbench/models/st_{pose,vel}_transformer_{ghm,l1}.yaml   loss variants (only the loss: block differs)
+neuraltrain-repo/neuraltrain/models/emg_vel_transformer.py        RawChannelGate + EmgVelTransformer (subclasses the vel model)
+neuralbench-repo/neuralbench/models/emg_vel_transformer{,_newton}.yaml
 neuralbench-repo/neuralbench/models/st_*_transformer*_newton.yaml           same six + Newton `infra:` block (2 GPUs, DDP)
 tutorial/neuralbench_slurm_infra.md                           what every infra: key does, how to launch
 tutorial/transformer_pose_models.md                          design + rationale + ablation plan

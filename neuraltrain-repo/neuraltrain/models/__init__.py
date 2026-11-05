@@ -41,3 +41,4 @@ from . import st_lstm_pose as _StLstmPoseModel  # noqa: F401
 from . import st_tcn_pose_cmixup as _StTcnPoseCMixupModel  # noqa: F401  (StTcnPose + C-Mixup)
 from . import st_pose_transformer as _StPoseTransformerModel  # noqa: F401  (trunk + Conformer encoder, angle head)
 from . import st_vel_transformer as _StVelTransformerModel  # noqa: F401  (same trunk, velocity decoder)
+from . import emg_vel_transformer as _EmgVelTransformerModel  # noqa: F401  (StVelTransformer with a raw-signal channel gate)
