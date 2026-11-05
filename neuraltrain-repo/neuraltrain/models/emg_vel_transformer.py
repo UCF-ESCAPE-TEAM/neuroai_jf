@@ -13,16 +13,31 @@ the ``(B, C, T)`` window itself, in the spirit of SE (Hu et al. 2018) and ECA
               averaged over time, log.  With n_feat = 1 and a flat kernel this
               reduces to log-RMS; with a learned bank it can measure energy in
               whichever temporal patterns help the pose loss.
-    excite    descriptor -> one gain per electrode in (0, 2)
-              "mlp": SE-style two-layer MLP over the flattened (C * n_feat)
-                     descriptor (every electrode sees every other).
-              "eca": ECA-style 1-D conv across the electrode axis with
-                     circular padding (the 16 electrodes form a ring), kernel
-                     ``eca_k``: each gain depends on its ``eca_k`` ring
-                     neighbours only, and the parameter count does not grow
-                     with C.
-              The last layer is zero-initialised, so the gate starts as the
-              identity.
+    excite    descriptor -> one gain per electrode in (0, 2). Four options, which
+              are the rows of Table 2 in the ECA paper (Wang et al., CVPR 2020)
+              applied to electrodes:
+              "se"        SE block, Eq. 2: W2 SiLU(W1 y) with a bottleneck of width
+                          ``ca_hidden`` (dimensionality reduction; every electrode
+                          sees every other).            params ~ 2 * C*n_feat*hidden
+              "fc"        SE-Var3, Eq. 3/4: one full linear layer W y, no
+                          reduction, every electrode sees every other.
+                                                        params = C*n_feat * C
+              "eca"       ECA, Eq. 9: the n_feat descriptors are averaged into ONE
+                          scalar per electrode (y in R^C, as in the paper), then a
+                          1-D conv of kernel ``gate_eca_k`` across the electrode
+                          axis, no bias, circular padding (the 16 electrodes form
+                          a ring). ``gate_eca_k: 0`` picks k adaptively from C
+                          with the paper's Eq. 12 (gamma 2, b 1 -> k 3 for C 16).
+                                                        params = k
+              "eca_multi" ECA on the full descriptor: the 1-D conv over the
+                          electrode axis has n_feat input channels, so it mixes
+                          the n_feat energies instead of averaging them first.
+                                                        params = k * n_feat (+1)
+              The last layer is zero-initialised in every option, so the gate
+              starts as the identity; the paper's sigma is replaced by 2*sigmoid
+              so that identity is the mid-point of the gain range rather than its
+              upper end (this is the one departure from Eq. 9, shared by all four
+              options so the comparison isolates the excitation structure).
     scale     x * gate
 
 ``causal=True``: the filter bank is left-padded, the energy average becomes a
@@ -31,6 +46,7 @@ per frame and the gains are held (zero-order) back to the sample rate, so the
 gain at sample t depends on x[.. t] only.
 """
 
+import math
 import typing as tp
 
 import torch
@@ -52,9 +68,9 @@ class EmgVelTransformer(StVelTransformer):
     gate_n_feat: int = 8                      # temporal filters in the learned squeeze
     gate_k: int = 63                          # their length in samples (63 = 31.5 ms at 2 kHz)
     gate_stride: int = 8                      # conv stride: energy is pooled over T / stride frames
-    gate_excite: tp.Literal["mlp", "eca"] = "mlp"
-    gate_eca_k: int = 3                       # ECA kernel over the electrode ring (odd)
-    # ``ca_hidden`` (inherited) is the MLP width for gate_excite: mlp
+    gate_excite: tp.Literal["se", "fc", "eca", "eca_multi", "mlp"] = "se"   # "mlp" = alias of "se"
+    gate_eca_k: int = 3                       # ECA kernel over the electrode ring (odd); 0 = adaptive (Eq. 12)
+    # ``ca_hidden`` (inherited) is the bottleneck width for gate_excite: se
 
     def build(self, n_spatial_locations: int, n_outputs: int | None) -> nn.Module:
         assert n_outputs is not None, "EmgVelTransformer requires n_outputs"
@@ -67,32 +83,52 @@ class EmgVelTransformer(StVelTransformer):
 # =============================================================================
 # Raw-signal channel gate
 # =============================================================================
+def eca_kernel_size(n_ch: int, gamma: int = 2, b: int = 1) -> int:
+    """ECA Eq. 12: k = |log2(C)/gamma + b/gamma|_odd (nearest odd number)."""
+    k = int(abs((math.log2(n_ch) + b) / gamma))
+    return k if k % 2 else k + 1
+
+
 class RawChannelGate(nn.Module):
+    EXCITES = ("se", "fc", "eca", "eca_multi")
+
     def __init__(self, n_ch: int, n_feat: int = 8, k: int = 63, stride: int = 8,
-                 excite: str = "mlp", hidden: int = 32, eca_k: int = 3,
+                 excite: str = "se", hidden: int = 32, eca_k: int = 3,
                  causal: bool = False, eps: float = 1e-6):
         super().__init__()
-        if excite not in ("mlp", "eca"):
-            raise ValueError(f"gate_excite must be 'mlp' or 'eca', got {excite!r}")
+        if excite == "mlp":
+            excite = "se"
+        if excite not in self.EXCITES:
+            raise ValueError(f"gate_excite must be one of {self.EXCITES}, got {excite!r}")
+        if eca_k == 0:
+            eca_k = eca_kernel_size(n_ch)
         if eca_k % 2 == 0:
-            raise ValueError("gate_eca_k must be odd")
+            raise ValueError("gate_eca_k must be odd (or 0 for adaptive)")
         self.n_ch, self.n_feat, self.stride = n_ch, n_feat, stride
         self.excite_kind, self.causal, self.eps = excite, causal, eps
+        self.eca_k = eca_k
         # squeeze: one filter bank shared by all electrodes (applied per electrode)
         self.pad = _same_pad(k, causal)
         self.feat = nn.Conv1d(1, n_feat, k, stride=stride, bias=False)
         # excitation
-        if excite == "mlp":
+        if excite == "se":                                              # Eq. 2
             self.excite = nn.Sequential(nn.Linear(n_ch * n_feat, hidden), nn.SiLU(),
                                         nn.Linear(hidden, n_ch))
             last = self.excite[-1]
-        else:
-            self.excite = nn.Conv1d(n_feat, 1, eca_k, bias=True)      # over the electrode axis
-            self.eca_pad = eca_k // 2
+        elif excite == "fc":                                            # Eq. 3, W full (SE-Var3)
+            self.excite = nn.Linear(n_ch * n_feat, n_ch)
             last = self.excite
+        elif excite == "eca":                                           # Eq. 9, C1D_k on y in R^C
+            self.excite = nn.Conv1d(1, 1, eca_k, bias=False)
+            last = self.excite
+        else:                                                           # eca_multi
+            self.excite = nn.Conv1d(n_feat, 1, eca_k, bias=True)
+            last = self.excite
+        self.eca_pad = eca_k // 2
         with torch.no_grad():                                           # identity at init
             last.weight.zero_()
-            last.bias.zero_()
+            if last.bias is not None:
+                last.bias.zero_()
 
     # ---- squeeze: (B, C, T) -> log-energy descriptors (B, C, n_feat[, T'])
     def _descriptor(self, x: torch.Tensor) -> torch.Tensor:
@@ -108,10 +144,11 @@ class RawChannelGate(nn.Module):
 
     # ---- excite: descriptors (N, C, n_feat) -> gains (N, C)
     def _gains(self, d: torch.Tensor) -> torch.Tensor:
-        if self.excite_kind == "mlp":
+        if self.excite_kind in ("se", "fc"):
             s = self.excite(d.flatten(1))                                # (N, C)
         else:
-            z = F.pad(d.transpose(1, 2), (self.eca_pad, self.eca_pad), mode="circular")  # (N, n_feat, C+2p)
+            z = d.mean(-1, keepdim=True) if self.excite_kind == "eca" else d   # (N, C, 1) | (N, C, n_feat)
+            z = F.pad(z.transpose(1, 2), (self.eca_pad, self.eca_pad), mode="circular")   # (N, f, C + 2p)
             s = self.excite(z).squeeze(1)                                # (N, C)
         return 2.0 * torch.sigmoid(s)
 
@@ -141,7 +178,7 @@ class EmgVelTransformerModel(StVelTransformerModel):
 
     def __init__(self, n_in_channels: int, n_outputs: int, sfreq: float = 2000.0,
                  gate_n_feat: int = 8, gate_k: int = 63, gate_stride: int = 8,
-                 gate_excite: str = "mlp", gate_eca_k: int = 3, **kwargs):
+                 gate_excite: str = "se", gate_eca_k: int = 3, **kwargs):
         super().__init__(n_in_channels, n_outputs, sfreq=sfreq, **kwargs)
         if kwargs.get("channel_attention", False):
             self.gate = RawChannelGate(

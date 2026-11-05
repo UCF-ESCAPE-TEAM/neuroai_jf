@@ -32,9 +32,17 @@ brain_model_config:
   # Replaces StVelTransformer's log-RMS / log-MAV gate: the squeeze is a bank of
   # gate_n_feat temporal filters (gate_k samples, stride gate_stride) shared
   # across electrodes, squared and time-averaged -> a learned log-energy
-  # descriptor per electrode. gate_excite: mlp = SE-style MLP over all
-  # electrodes (width ca_hidden); eca = ECA-style 1-D conv over the electrode
-  # ring (kernel gate_eca_k, circular). Identity at init.
+  # descriptor per electrode. gate_excite picks the excitation (ECA paper,
+  # Wang et al. 2020, Table 2, applied to electrodes):
+  #   se        SE block Eq. 2, bottleneck ca_hidden            (~5.2 k params)
+  #   fc        SE-Var3 Eq. 3, one full C*n_feat -> C layer       (2.1 k)
+  #   eca       ECA Eq. 9: mean of the n_feat energies -> 1-D conv of kernel
+  #             gate_eca_k across the electrode ring, no bias   (3 params)
+  #             gate_eca_k: 0 -> adaptive k from Eq. 12 (k 3 for 16 electrodes)
+  #   eca_multi ECA conv with the n_feat energies as input channels (25)
+  # All start as the identity (2*sigmoid, zero-init last layer).
+  # Comparison: emg_vel_transformer.yaml (se) vs emg_vel_transformer_eca.yaml
+  # (eca); the two files differ in that one line.
   # Everything else in this file equals st_vel_transformer.yaml.
   # ======================================================================
   channel_attention: true
@@ -42,7 +50,7 @@ brain_model_config:
   gate_n_feat: 8
   gate_k: 63
   gate_stride: 8
-  gate_excite: mlp
+  gate_excite: se
   gate_eca_k: 3
   f1: 64
   k_e: 65

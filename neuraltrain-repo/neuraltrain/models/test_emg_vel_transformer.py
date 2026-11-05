@@ -3,7 +3,7 @@ import pytest
 import torch
 
 from .base import BaseBrainModelConfig
-from .emg_vel_transformer import EmgVelTransformerModel, RawChannelGate
+from .emg_vel_transformer import EmgVelTransformerModel, RawChannelGate, eca_kernel_size
 
 
 class _Holder(pydantic.BaseModel):
@@ -21,7 +21,7 @@ def _small(name="EmgVelTransformer", **over):
     return _Holder(brain_model_config=cfg).brain_model_config.build(16, 20)
 
 
-@pytest.mark.parametrize("excite", ["mlp", "eca"])
+@pytest.mark.parametrize("excite", ["se", "fc", "eca", "eca_multi"])
 @pytest.mark.parametrize("causal", [False, True])
 def test_shapes_and_causality(excite, causal):
     torch.manual_seed(0)
@@ -82,3 +82,26 @@ def test_bad_args():
         RawChannelGate(16, excite="softmax")
     with pytest.raises(ValueError):
         RawChannelGate(16, excite="eca", eca_k=4)
+
+
+def test_eca_is_faithful_to_eq9():
+    """ECA: one scalar per electrode, k weights, no bias, circular over the ring."""
+    gate = RawChannelGate(16, n_feat=3, k=15, stride=4, excite="eca", eca_k=0)
+    assert gate.eca_k == 3 and eca_kernel_size(16) == 3 and eca_kernel_size(64) == 3 and eca_kernel_size(256) == 5
+    assert sum(p.numel() for p in gate.excite.parameters()) == 3
+    assert gate.excite.bias is None
+    with torch.no_grad():
+        gate.excite.weight.copy_(torch.tensor([[[0.0, 0.0, 1.0]]]))     # gain_i depends on y_{i+1} only
+    d = torch.zeros(1, 16, 3)
+    d[0, 0] = 5.0                                                        # electrode 0 is loud
+    g = gate._gains(d)
+    assert g[0, 15] > 1.0 and (g[0, 1:15] == 1.0).all() and g[0, 0] == 1.0   # ring: 15 sees 0
+
+
+def test_param_counts_follow_the_paper_table():
+    C, f = 16, 3
+    n = lambda ex, **kw: sum(p.numel() for p in RawChannelGate(C, n_feat=f, excite=ex, hidden=4, **kw).excite.parameters())
+    assert n("fc") == C * f * C + C
+    assert n("eca", eca_k=3) == 3
+    assert n("eca_multi", eca_k=3) == 3 * f + 1
+    assert n("se") == C * f * 4 + 4 + 4 * C + C
