@@ -84,9 +84,9 @@ trainer_config:
   strategy: auto
   # emg2pose allows 500 epochs with patience 50; capped to fit SLURM's 2-day
   # limit at roughly 0.3 h/epoch.
-  patience: 20
+  patience: 50
   n_epochs: 100
-  gradient_clip_val: 0
+  gradient_clip_val: 1.0
   # The Rich bar buffers its writes, leaving the log silent for a whole epoch;
   # per-epoch lines still land without it.
   enable_progress_bar: true
