@@ -37,6 +37,9 @@ data:
       # exca's RAM cache never evicts, so retaining any of these 25232
       # recordings grows past 250 GB and the host OOM-kills the run.
       keep_in_ram: false
+      # Cache-building jobs; 180 min timed out once the window filter changed
+      # (Nov 2026). Only used when the cache has to be (re)built.
+      timeout_min: 600
   target:
     =replace=: true
     # The 20 joint angles are MISC channels in the same BDF as the EMG.
@@ -57,7 +60,7 @@ data:
       folder: !!python/name:neuralbench.config_manager.CACHE_DIR
       keep_in_ram: false
       slurm_partition: !!python/name:neuralbench.config_manager.SLURM_PARTITION
-      timeout_min: 180
+      timeout_min: 600
       gpus_per_node: 1
       cpus_per_task: 10
       min_samples_per_job: 200
@@ -70,10 +73,12 @@ data:
   stride_drop_incomplete: true
   # emg2pose's ``skip_ik_failures``: windows overlapping an IK failure are dropped
   # from every split rather than kept with the failed frames masked out.
-  min_finite_target_fraction: 0.5
-  neuro:
-    infra:
-      timeout_min: 600
+  # Keep 1.0 here so every earlier run stays reproducible; experiments that
+  # restore those windows (ca_emgmamba_vel_r1.yaml) override it in the model
+  # YAML with ``data: {min_finite_target_fraction: 0.5}``. At 0.5 the local
+  # val/test sets change too, so compare against 1.0 runs only through an
+  # eval YAML that sets the fraction back to 1.0.
+  min_finite_target_fraction: 1.0
   summary_columns: [user, stage, side, generalization]
 brain_model_output_size: &brain_model_output_size 20
 brain_model_config:
