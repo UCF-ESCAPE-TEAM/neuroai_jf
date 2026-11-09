@@ -1,0 +1,160 @@
+# R3 of the CaEmgMamba tuning plan, Newton twin: ca_emgmamba_vel_newton.yaml (R0)
+# with the token rate raised 50 -> 200 Hz by dropping stem stage 3. The three
+# head constants are rescaled so they mean the same time intervals as in R0
+# (they count frames). Everything else is R0. Task config unchanged (fraction 1.0).
+# Question: does finer timing (and Mamba's linear cost) help the fast stages?
+# Pass = heldout_stage down by >= 0.3 deg; also log minutes/epoch and GPU memory.
+# Cost: each scan runs 1000 steps instead of 250 -> ~4x epoch time with the
+# pure-PyTorch scan; scan_checkpoint: true keeps memory flat. Check whether
+# mamba_ssm is installed in challenge_2026 first (scan_impl: auto uses it).
+brain_model_config:
+  =replace=: true
+  name: "CaEmgMamba"
+  sfreq: 2000.0
+  # ======================================================================
+  # Per-window normalisation (WindowNorm, no parameters): z-score of every
+  # electrode over its own 5-s window = LayerNorm over time without affine
+  # weights. REQUIRED for Codabench (the server feeds EMG at another scale).
+  # There is no EmgPreproc front end in this model: no FIR band-pass, no
+  # notches, no bad-channel rejection.
+  # ======================================================================
+  norm_eps: 1.0e-12
+  # ======================================================================
+  # 1-D CNN downsampler. One entry per stage:
+  #   Conv1d(stride) -> GroupNorm -> GELU -> Dropout -> [channel attention]
+  # The 16 electrodes are plain input channels of stage 1 (no spatial block).
+  #   stage 1  k 31 (15.5 ms @ 2 kHz), stride 5 : 2000 -> 400 Hz, 64 ch
+  #   stage 2  k  9 (22.5 ms @ 400 Hz), stride 4:  400 -> 100 Hz, 128 ch
+  #   stage 3  k  5 (50 ms  @ 100 Hz), stride 2 :  100 ->  50 Hz, 192 ch
+  # -> 250 tokens per 5-s window. For 200 Hz tokens (1000 per window) use
+  #    stem_channels [64, 192], stem_kernels [31, 9], stem_strides [5, 2].
+  # ======================================================================
+  stem_channels: [64, 192]    # R3: two stages (R0: [64, 128, 192]); encoder width unchanged
+  stem_kernels: [31, 9]       # R3 (R0: [31, 9, 5])
+  stem_strides: [5, 2]        # R3: 2000 -> 400 -> 200 Hz, 1000 tokens per window (R0: 50 Hz, 250)
+  stem_groups: 8
+  stem_dropout: 0.1
+  # ======================================================================
+  # Channel attention on the stem's feature channels (after the GELU).
+  #   se    squeeze-and-excitation, bottleneck C / ca_reduction
+  #   eca   1-D conv across the channel axis; ca_eca_k 0 = adaptive (Eq. 12)
+  #   none  no gate
+  # ca_stages: 1-based stages that get a gate. Placement ablation:
+  #   []  |  [1]  |  [1, 2, 3] (this file)  |  [3]
+  # Every gate is the identity at initialisation.
+  # ======================================================================
+  ca_kind: se
+  ca_stages: [1, 2, 3]
+  ca_reduction: 8
+  ca_eca_k: 0
+  # ======================================================================
+  # Mamba temporal encoder at the token rate. Original Mamba block
+  # (d_inner = expand * d_model, d_state decay rates per inner channel).
+  # bidirectional: one block forward + one on the reversed frames, averaged.
+  # dt_rank 0 = ceil(d_model / 16).
+  # scan_impl: auto  -> mamba_ssm CUDA kernel when installed and on a GPU,
+  #                     pure-PyTorch scan otherwise (same weights either way)
+  #            torch -> always the pure-PyTorch scan (slower; fine for inference)
+  # scan_checkpoint: re-run each pure-PyTorch scan in backward instead of storing
+  #                  it. Same gradients, far less memory, slower. No effect on the
+  #                  mamba_ssm kernel or on inference.
+  # ======================================================================
+  d_model: 192
+  n_layers: 4
+  d_state: 16
+  expand: 2
+  d_conv: 4
+  dt_rank: 0
+  bidirectional: true
+  enc_dropout: 0.1
+  scan_impl: auto
+  scan_checkpoint: true
+  # ======================================================================
+  # Head. vel = position + velocity readouts per frame, integrated and fused
+  # (VEMG2Pose hybrid parameterisation + complementary filter):
+  #   pose_t = position_t                                          t <  position_steps
+  #   pose_t = (1-g) * (pose_{t-1} + vel_scale * velocity_t) + g * position_t   otherwise
+  # position_steps 12 frames = 240 ms at 50 Hz.
+  # vel_scale 0.02 rad/frame per unit readout = 1 rad/s per unit at 50 Hz.
+  # fuse_gain g: 0 = pure integration (smooth, drifts), 1 = the pose head,
+  #   0.1 = drift is forgotten with a ~10-frame (200 ms) time constant.
+  # If the token rate changes, rescale: frames = seconds * rate.
+  # ======================================================================
+  head: vel
+  position_steps: 48          # R3: 240 ms at 200 Hz (R0: 12 frames at 50 Hz)
+  vel_scale: 0.005            # R3: 1 rad/s per unit at 200 Hz (R0: 0.02 at 50 Hz)
+  fuse_gain: 0.025            # R3: same ~200 ms drift time constant (R0: 0.1 at 50 Hz)
+
+# OHEM, as in the transformer YAMLs. Mining ranks frames by the error of the
+# fused pose (the model output), which is what the metric scores.
+loss:
+  =replace=: true
+  name: OhemRegressionLoss
+  keep_fraction: 0.3
+  easy_weight: 0.1
+  select: frame
+  base: l1
+  weight_in_eval: false
+
+# Same optimiser block as st_{pose,vel}_transformer.yaml so runs are comparable.
+lightning_optimizer_config:
+  =replace=: true
+  optimizer:
+    name: AdamW
+    lr: 3.0e-4
+    kwargs:
+      weight_decay: 0.05
+      betas: [0.9, 0.98]
+  scheduler:
+    name: OneCycleLR
+    kwargs:
+      max_lr: 3.0e-4
+      pct_start: 0.1
+      anneal_strategy: cos
+      div_factor: 25.0
+      final_div_factor: 100.0
+  interval: step
+trainer_config:
+  gradient_clip_val: 1.0
+
+# ======================================================================
+# Ablation plan (one change per run):
+#   A  ca_stages: [] / [1] / [3]        gate placement
+#   B  ca_kind: eca                      SE vs ECA
+#   C  token rate 200 Hz (see stem note) does Mamba's linear cost pay off?
+#   D  bidirectional: false              how much does the reversed pass add?
+#   E  n_layers: 2 / 6                   depth
+#   F  fuse_gain: 0.0 / 0.05 / 0.3      integration vs anchoring
+#   head: pose -> ca_emgmamba_pose.yaml  pose vs velocity head, same trunk
+# ======================================================================
+
+csv_config: {}
+delete_checkpoints_on_exit: false
+
+# ======================================================================
+# Newton (UCF GPU cluster) SLURM resources -- from tutorial/neuralbench_slurm_infra.md.
+# Top-level `infra:` merges key by key into neuralbench/defaults/config.yaml
+# and is NOT part of the cache key, so this file shares results with the
+# non-_newton YAML of the same name. 2 GPUs, DDP (one process per GPU):
+# data.batch_size (128) is per device, so the effective batch is 256.
+# Launch from a compute node, never evuser2:
+#   srun -p short --pty bash
+#   module purge && module load anaconda/anaconda-2024.10 && conda activate challenge_2026
+#   export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+#   neuralbench emg pose -m <this file's stem>      # inside tmux; -r retries a failed job
+# Do not put `module purge` in slurm_setup (the anaconda modulefile loops on unload).
+# ======================================================================
+infra:
+  gpus_per_node: 2
+  tasks_per_node: 2          # one process per GPU; needs slurm_use_srun: true
+  cpus_per_task: 10          # keep equal to N_CPUS (data.num_workers) in ~/.neuralbench/config.json
+  mem_gb: 64
+  timeout_min: 4320          # 72 h: R3 runs 4x the scan steps of R0 (1000 tokens)
+  slurm_use_srun: true
+  slurm_additional_parameters:
+    exclude: "evc[1-13,15-21,26]"   # stay on evc22-50
+    mail-type: "END,FAIL"
+    mail-user: "ji045311@ucf.edu"
+  slurm_setup:
+    - "unset OPENBLAS_NUM_THREADS MKL_NUM_THREADS"
+    - "export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK"
