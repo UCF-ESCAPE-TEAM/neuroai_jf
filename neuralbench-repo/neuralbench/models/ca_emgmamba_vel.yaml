@@ -121,3 +121,6 @@ trainer_config:
 
 csv_config: {}
 delete_checkpoints_on_exit: false
+
+infra:
+  timeout_min: 4320      # 72 h

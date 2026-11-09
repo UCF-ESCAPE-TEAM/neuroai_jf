@@ -70,7 +70,10 @@ data:
   stride_drop_incomplete: true
   # emg2pose's ``skip_ik_failures``: windows overlapping an IK failure are dropped
   # from every split rather than kept with the failed frames masked out.
-  min_finite_target_fraction: 1.0
+  min_finite_target_fraction: 0.5
+  neuro:
+    infra:
+      timeout_min: 600
   summary_columns: [user, stage, side, generalization]
 brain_model_output_size: &brain_model_output_size 20
 brain_model_config:
