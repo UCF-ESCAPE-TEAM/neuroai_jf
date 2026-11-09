@@ -65,6 +65,18 @@ Steps 1-3 (files in the fork, tests, parameter count and timing) and step 5 (`_n
 - **Bidirectional = two blocks with separate weights, averaged.** Mamba is causal; the challenge allows bidirectional processing inside a window.
 - **Same loss and optimiser as the transformer YAMLs**, so the comparison isolates the architecture.
 
+### Added 2026-11-09: time-stretch augmentation (R4)
+
+`CaEmgMamba` has two new config fields, `time_stretch_prob` (default 0.0 = off, so every
+earlier YAML is unchanged) and `time_stretch_range` (default `(0.8, 1.2)`). When on, the
+model exposes `train_batch_transform` (the hook `pl_module._run_step` already calls for
+C-Mixup) and `TimeStretch` resamples EMG and targets together about the window centre by a
+per-window factor; targets outside the window become NaN and are masked. No parameters, so
+R0 checkpoints still load strictly. YAML: `ca_emgmamba_vel_newton_R4.yaml`. Tests:
+`test_time_stretch_*` in `test_ca_emgmamba.py`. Rationale and the R0 three-split readout
+(heldout_user 12.58 deg, heldout_stage 16.94 deg, user_stage 16.89 deg, Codabench 19.01
+deg) are in the tuning plan Google Doc "CaEmgMamba tuning plan (NeurIPS 2026 Track 4)".
+
 ## 5. Results log
 
 | Date | Run | YAML (+ overrides) | Commit | params | best epoch | val/mae (rad) | test user_stage (rad / deg) | heldout_user | heldout_stage | Codabench |

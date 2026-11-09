@@ -163,3 +163,56 @@ def test_fast_scan_parity():
         blk.scan_impl = "torch"
         slow = blk(x)
     assert torch.allclose(fast, slow, atol=1e-4, rtol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Time-stretch augmentation (R4)
+# ---------------------------------------------------------------------------
+def test_time_stretch_factor_one_is_identity():
+    ts = m.TimeStretch(prob=1.0, lo=1.0, hi=1.0)
+    x, y = torch.randn(3, 16, 2000), torch.randn(3, 20, 2000)
+    y[0, :, 100:120] = torch.nan
+    xs, ys = ts(x, y)
+    assert torch.allclose(xs, x, atol=1e-5)
+    assert torch.equal(torch.isnan(ys), torch.isnan(y)) and torch.allclose(ys[~ys.isnan()], y[~y.isnan()], atol=1e-5)
+    assert ts.last_stats["ts_frac_masked"] == 0.0
+
+
+def test_time_stretch_slows_and_speeds_consistently():
+    """A ramp target r(t) = t stretched by f about the centre becomes c + (t-c) f."""
+    T = 2001
+    ramp = torch.arange(T, dtype=torch.float32)
+    for f in (0.8, 1.25):
+        ts = m.TimeStretch(prob=1.0, lo=f, hi=f)
+        x = ramp.expand(1, 2, T).clone()
+        y = ramp.expand(1, 3, T).clone()
+        xs, ys = ts(x, y)
+        c = (T - 1) / 2
+        expect = c + (ramp - c) * f
+        inside = (expect >= 0) & (expect <= T - 1)
+        assert torch.allclose(ys[0, 0][inside], expect[inside], atol=1e-2)
+        assert ys[0, 0][~inside].isnan().all()                   # out-of-window frames masked
+        assert torch.allclose(xs[0, 0][inside], expect[inside], atol=1e-2)
+        assert torch.isfinite(xs).all()                          # EMG edge-held, never NaN
+        if f > 1:
+            assert ts.last_stats["ts_frac_masked"] > 0.0
+        else:
+            assert ts.last_stats["ts_frac_masked"] == 0.0
+
+
+def test_time_stretch_prob_zero_disables_hook():
+    off = _build(time_stretch_prob=0.0)
+    assert off.time_stretch is None and not hasattr(off, "train_batch_transform")
+    on = _build(time_stretch_prob=1.0, time_stretch_range=(0.9, 1.1)).train()
+    x, y = torch.randn(2, C, 2000), torch.randn(2, J, 2000)
+    xs, ys = on.train_batch_transform(x, y, None)
+    assert xs.shape == x.shape and ys.shape == y.shape
+    assert set(on.last_mix_stats) == {"ts_factor_mean", "ts_frac_masked"}
+    on.eval()
+    xe, ye = on.train_batch_transform(x, y, None)
+    assert torch.equal(xe, x) and torch.equal(ye, y)             # inert outside training
+
+
+def test_time_stretch_fields_do_not_change_state_dict():
+    a, b = _build(time_stretch_prob=0.0), _build(time_stretch_prob=1.0)
+    assert list(a.state_dict()) == list(b.state_dict())           # no parameters, old checkpoints load
