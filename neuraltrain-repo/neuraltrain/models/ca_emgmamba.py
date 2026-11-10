@@ -511,21 +511,30 @@ class CaEmgMambaModel(nn.Module):
         self.time_stretch = (TimeStretch(time_stretch_prob, *time_stretch_range)
                              if time_stretch_prob > 0 else None)
         self.last_mix_stats: dict[str, float] = {}
-        if self.time_stretch is not None:
-            self.train_batch_transform = self._time_stretch_batch
 
-    def _time_stretch_batch(self, neuro, target, subject_ids=None):
-        """Hook for pl_module: stretch EMG and targets together (training only)."""
-        if not self.training:
+    # ---- NeuralBench training hook ------------------------------------------------
+    def train_batch_transform(self, neuro, target, subject_ids=None):
+        """Called by ``pl_module._run_step`` in training with the batch's EMG
+        ``(B, C, T)``, targets ``(B, J, T)`` (NaN = unlabelled) and subject ids.
+        Applies the time-stretch when enabled; a no-op otherwise. Subclasses
+        (C-Mixup) extend it by calling ``super()`` first.
+        """
+        self.last_mix_stats = {}
+        if self.time_stretch is None or not self.training:
             return neuro, target
         neuro, target = self.time_stretch(neuro, target)
-        self.last_mix_stats = self.time_stretch.last_stats
+        self.last_mix_stats = dict(self.time_stretch.last_stats)
         return neuro, target
+
+    def _after_norm(self, x: torch.Tensor) -> torch.Tensor:
+        """Identity here; :class:`CaEmgMambaCMixupModel` mixes window pairs at this point."""
+        return x
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """EMG ``(B, C, T)`` -> joint angles ``(B, T, n_outputs)``."""
         n_samples = x.shape[-1]
-        z = self.stem(self.norm(x))        # (B, F, T')  features at ~50 Hz
+        x = self._after_norm(self.norm(x)) # (B, C, T)   z-scored per window (hook for C-Mixup)
+        z = self.stem(x)                   # (B, F, T')  features at ~50 Hz
         z = self.encoder(z)                # (B, d, T')  contextual features
         y = self.head(z)                   # (B, J, T')  one pose per frame
         y = F.interpolate(y, size=n_samples, mode="linear", align_corners=False)

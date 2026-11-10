@@ -77,6 +77,17 @@ R0 checkpoints still load strictly. YAML: `ca_emgmamba_vel_newton_R4.yaml`. Test
 (heldout_user 12.58 deg, heldout_stage 16.94 deg, user_stage 16.89 deg, Codabench 19.01
 deg) are in the tuning plan Google Doc "CaEmgMamba tuning plan (NeurIPS 2026 Track 4)".
 
+### Added 2026-11-10: C-Mixup variant (R5)
+
+`ca_emgmamba_cmixup.py` adds `CaEmgMambaCMixup` / `CaEmgMambaCMixupModel`, a subclass of the
+base model with the C-Mixup training hook (same sampling helpers as `st_tcn_pose_cmixup.py`):
+targets are mixed in `train_batch_transform`, inputs after `WindowNorm` via the new
+`_after_norm` hook; it composes with the time-stretch (stretch first, then mix). No new
+parameters: checkpoints load into the plain `ca_emgmamba_vel` submission. The base model's
+`train_batch_transform` is now always defined (a no-op when `time_stretch_prob` is 0) so
+subclasses can extend it. YAML: `ca_emgmamba_vel_newton_R5.yaml`. Tests:
+`test_ca_emgmamba_cmixup.py` (5) plus the existing 26.
+
 ## 5. Results log
 
 | Date | Run | YAML (+ overrides) | Commit | params | best epoch | val/mae (rad) | test user_stage (rad / deg) | heldout_user | heldout_stage | Codabench |

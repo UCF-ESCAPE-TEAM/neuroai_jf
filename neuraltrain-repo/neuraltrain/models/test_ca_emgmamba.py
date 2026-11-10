@@ -201,8 +201,11 @@ def test_time_stretch_slows_and_speeds_consistently():
 
 
 def test_time_stretch_prob_zero_disables_hook():
-    off = _build(time_stretch_prob=0.0)
-    assert off.time_stretch is None and not hasattr(off, "train_batch_transform")
+    off = _build(time_stretch_prob=0.0).train()
+    assert off.time_stretch is None
+    x0, y0 = torch.randn(2, C, 2000), torch.randn(2, J, 2000)
+    xo, yo = off.train_batch_transform(x0, y0, None)
+    assert torch.equal(xo, x0) and torch.equal(yo, y0) and off.last_mix_stats == {}   # no-op when off
     on = _build(time_stretch_prob=1.0, time_stretch_range=(0.9, 1.1)).train()
     x, y = torch.randn(2, C, 2000), torch.randn(2, J, 2000)
     xs, ys = on.train_batch_transform(x, y, None)

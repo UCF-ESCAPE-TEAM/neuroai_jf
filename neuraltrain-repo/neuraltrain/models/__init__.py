@@ -43,3 +43,4 @@ from . import st_pose_transformer as _StPoseTransformerModel  # noqa: F401  (tru
 from . import st_vel_transformer as _StVelTransformerModel  # noqa: F401  (same trunk, velocity decoder)
 from . import emg_vel_transformer as _EmgVelTransformerModel  # noqa: F401  (StVelTransformer with a raw-signal channel gate)
 from . import ca_emgmamba as _CaEmgMambaModel  # noqa: F401  (CNN + channel attention + bidirectional Mamba, pose/vel heads)
+from . import ca_emgmamba_cmixup as _CaEmgMambaCMixupModel  # noqa: F401  (CaEmgMamba + C-Mixup training)
