@@ -155,4 +155,4 @@ delete_checkpoints_on_exit: false
 # Do not put `module purge` in slurm_setup (the anaconda modulefile loops on unload).
 # ======================================================================
 infra:
-  timeout_min: 2880          # 48 h; `normal` has no partition limit
+  timeout_min: 5760          # 96 h; `normal` has no partition limit
