@@ -1,0 +1,81 @@
+# EMGFormer-S (Xi et al. 2026, EgoEMG; Table S12): L 3, d 256, 4 heads, d_FFN 512.
+# Paper: 3.5M parameters (8 channels, 22 angles); this build: 3.10M (16 channels, 20 angles).
+# Model code and the list of choices the paper leaves open: neuraltrain/models/emgformer.py
+#   neuralbench emg pose -m emgformer_s --debug      # smoke test
+#   neuralbench emg pose -m emgformer_s              # full run (-f to rerun)
+brain_model_config:
+  =replace=: true
+  name: "EmgFormer"
+  sfreq: 2000.0
+  # ======================================================================
+  # Zero-phase filter (paper App. B.4; Table S3: ~1.5-1.8 deg better with it
+  # on EgoEMG). Applied inside the model, per window, so it also runs in
+  # the Codabench submission. It has no weights: a checkpoint trained with
+  # it loads without it and vice versa, but train and test must agree.
+  #   filter: true   -> band-pass + mains notches (this file)
+  #   filter: false  -> raw EMG straight into the per-window z-score
+  # Changing any of these changes the config hash, i.e. it is a new run.
+  # ======================================================================
+  filter: true
+  l_freq: 20.0            # high-pass corner, Hz (null = no high-pass)
+  h_freq: 450.0           # low-pass corner, Hz (null = no low-pass)
+  notch_freq: 60.0        # mains base: emg2pose is a 60 Hz recording (paper: 50); null = no notches
+  notch_max_freq: 450.0   # notch every harmonic up to here: 60, 120, ..., 420 Hz
+  notch_width: 2.0        # -3 dB width of each notch, Hz (not given in the paper)
+  filter_order: 4         # Butterworth order of each pass (not given in the paper)
+  filter_pad: 1000        # odd-reflection pad per side before filtering, samples
+  # ======================================================================
+  # Per-window z-score of every electrode. REQUIRED for Codabench (the
+  # server feeds EMG at another scale); leave it on.
+  # ======================================================================
+  norm: zscore
+  # ======================================================================
+  # TDS featurizer (App. D.2), 2 kHz -> 40 Hz, 256 features per token
+  # (200 tokens per 5-s window):
+  #   block 1  Conv1d 16 -> 256, k 11, stride 5
+  #   block 2  Conv1d 256 -> 256, k 5, stride 2
+  #   block 3  Conv1d k 9, stride 5 + TDS conv (k 5, 8 x 32) + FC + SE
+  #   block 4  Conv1d k 3, stride 1 + TDS conv (k 3, 8 x 32) + FC + SE
+  # ======================================================================
+  tds_features: 256
+  tds_channels: 8
+  conv_kernels: [11, 5, 9, 3]
+  conv_strides: [5, 2, 5, 1]
+  tds_kernels: [0, 0, 5, 3]
+  se_reduction: 16
+  # ======================================================================
+  # Transformer with RoPE, post-norm -- the EMGFormer-S row of Table S12.
+  # ======================================================================
+  n_layers: 3
+  d_model: 256
+  n_heads: 4
+  d_ffn: 512
+  dropout: 0.1            # not given in the paper
+  head_hidden: 0          # Linear -> GELU -> Linear head; 0 = d_model
+
+# Paper optimiser (App. D.2): AdamW, lr 5e-4 cosine-annealed to 5e-6,
+# weight decay 1e-2, gradient clipping 1.0. The cosine runs over the full
+# n_epochs (task default 100; the paper trains 150). Loss stays the task's
+# L1 on valid frames, which is the paper's masked angular MAE in radians.
+# The paper's augmentations are not reproduced; the task's electrode
+# rotation is used instead.
+lightning_optimizer_config:
+  =replace=: true
+  optimizer:
+    name: AdamW
+    lr: 5.0e-4
+    kwargs:
+      weight_decay: 0.01
+      betas: [0.9, 0.999]
+  scheduler:
+    name: CosineAnnealingLR
+    kwargs:
+      eta_min: 5.0e-6
+  interval: step
+trainer_config:
+  gradient_clip_val: 1.0
+
+# per-epoch metrics in lightning_logs/version_0/metrics.csv under the run dir
+csv_config: {}
+# keep best.ckpt for weight extraction
+delete_checkpoints_on_exit: false

@@ -44,3 +44,4 @@ from . import st_vel_transformer as _StVelTransformerModel  # noqa: F401  (same 
 from . import emg_vel_transformer as _EmgVelTransformerModel  # noqa: F401  (StVelTransformer with a raw-signal channel gate)
 from . import ca_emgmamba as _CaEmgMambaModel  # noqa: F401  (CNN + channel attention + bidirectional Mamba, pose/vel heads)
 from . import ca_emgmamba_cmixup as _CaEmgMambaCMixupModel  # noqa: F401  (CaEmgMamba + C-Mixup training)
+from . import emgformer as _EmgFormerModel  # noqa: F401  (EgoEMG EMGFormer: TDS featurizer + RoPE Transformer, optional zero-phase filter)
