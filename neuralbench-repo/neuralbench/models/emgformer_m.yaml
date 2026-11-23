@@ -70,6 +70,10 @@ lightning_optimizer_config:
   scheduler:
     name: CosineAnnealingLR
     kwargs:
+      # Placeholder only: neuralbench replaces T_max with the run's total number
+      # of optimiser steps (pl_module.configure_optimizers). It has to be present
+      # because the kwargs are validated before that value is filled in.
+      T_max: 1
       eta_min: 5.0e-6
   interval: step
 trainer_config:
