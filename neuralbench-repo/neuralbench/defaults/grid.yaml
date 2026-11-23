@@ -15,5 +15,3 @@
 #   keep the train/val/test partition identical across runs.
 seed:
   - 33
-  - 34
-  - 35
