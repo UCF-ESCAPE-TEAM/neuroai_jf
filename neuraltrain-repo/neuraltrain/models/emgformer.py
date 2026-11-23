@@ -29,7 +29,9 @@ Not specified (defaults here, all exposed as config fields):
   window is filtered on its own after an odd-reflection pad of ``filter_pad`` samples.
 * mains frequency: EgoEMG is a 50 Hz recording, emg2pose a 60 Hz one -> ``notch_freq``.
 * padding, normalisation and activation inside the TDS blocks -> centred "same"
-  padding, LayerNorm + ReLU (as in emg2pose's TDS).
+  padding, ReLU, and layer normalisation over features and time as in the original
+  TDS paper (``tds_norm: time``). Normalising each time step on its own
+  (``tds_norm: step``) removes the EMG envelope and the model then predicts a constant.
 * 256 -> 384 bridge for the L size -> one Linear (identity when d_model == 256).
 * dropout, FFN activation, head hidden width -> 0.1, GELU, d_model.
 * input normalisation: the paper uses training-set statistics; the Codabench server
@@ -73,6 +75,7 @@ class EmgFormer(BaseBrainModelConfig):
     conv_strides: tuple[int, ...] = (5, 2, 5, 1)      # 2000 -> 400 -> 200 -> 40 -> 40 Hz
     tds_kernels: tuple[int, ...] = (0, 0, 5, 3)       # TDS conv kernel per block; 0 = no TDS part
     se_reduction: int = 16
+    tds_norm: tp.Literal["time", "batch", "step"] = "time"   # see ChannelLayerNorm
     # ---- Transformer (Table S12) ----
     d_model: int = 256
     n_layers: int = 3
@@ -186,14 +189,33 @@ class WindowNorm(nn.Module):
 # TDS featurizer
 # =============================================================================
 class ChannelLayerNorm(nn.Module):
-    """LayerNorm over the feature axis of a ``(B, F, T)`` tensor."""
+    """Normalisation of a ``(B, F, T)`` feature map; ``kind`` sets what is pooled.
 
-    def __init__(self, n_features: int):
+    "time"   one mean / std per window, over features AND time (Hannun et al. 2019:
+             "over all dimensions for a given example including time"). Keeps how the
+             signal strength changes along the window, which is where EMG carries its
+             information. Default.
+    "batch"  BatchNorm1d: statistics per feature over batch and time. Also keeps the
+             amplitude; adds running statistics to the checkpoint.
+    "step"   LayerNorm over the features of each time step on its own. This rescales
+             every time step to unit variance and so removes the EMG envelope: with it
+             the model collapsed to a constant pose (val R2 ~ 0) on emg2pose. Kept only
+             to reproduce that run.
+    """
+
+    def __init__(self, n_features: int, kind: str = "time"):
         super().__init__()
-        self.norm = nn.LayerNorm(n_features)
+        if kind not in ("time", "batch", "step"):
+            raise ValueError(f"tds_norm must be 'time', 'batch' or 'step', got {kind!r}")
+        self.kind = kind
+        self.norm = {"time": lambda: nn.GroupNorm(1, n_features),
+                     "batch": lambda: nn.BatchNorm1d(n_features),
+                     "step": lambda: nn.LayerNorm(n_features)}[kind]()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.norm(x.transpose(1, 2)).transpose(1, 2)
+        if self.kind == "step":
+            return self.norm(x.transpose(1, 2)).transpose(1, 2)
+        return self.norm(x)
 
 
 class TdsConvBlock(nn.Module):
@@ -203,13 +225,13 @@ class TdsConvBlock(nn.Module):
     ``width``; a ``(1, k)`` 2-D convolution mixes the groups along time only.
     """
 
-    def __init__(self, channels: int, width: int, kernel: int):
+    def __init__(self, channels: int, width: int, kernel: int, norm: str = "time"):
         super().__init__()
         if kernel % 2 == 0:
             raise ValueError("tds_kernels must be odd")
         self.channels, self.width = channels, width
         self.conv = nn.Conv2d(channels, channels, (1, kernel), padding=(0, kernel // 2))
-        self.norm = ChannelLayerNorm(channels * width)
+        self.norm = ChannelLayerNorm(channels * width, norm)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:           # (B, F, T)
         B, n_feat, T = x.shape
@@ -220,15 +242,15 @@ class TdsConvBlock(nn.Module):
 class TdsFullyConnectedBlock(nn.Module):
     """Channel-wise (per time step) two-layer MLP with a residual connection."""
 
-    def __init__(self, n_features: int):
+    def __init__(self, n_features: int, norm: str = "time"):
         super().__init__()
         self.fc = nn.Sequential(nn.Linear(n_features, n_features), nn.ReLU(),
                                 nn.Linear(n_features, n_features))
-        self.norm = nn.LayerNorm(n_features)
+        self.norm = ChannelLayerNorm(n_features, norm)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:           # (B, F, T)
-        x = x.transpose(1, 2)
-        return self.norm(x + self.fc(x)).transpose(1, 2)
+        y = self.fc(x.transpose(1, 2)).transpose(1, 2)
+        return self.norm(x + y)
 
 
 class SqueezeExcite(nn.Module):
@@ -248,16 +270,16 @@ class TdsStage(nn.Module):
     """Strided Conv1d -> LayerNorm -> ReLU, then (``tds_kernel`` > 0) TDS conv -> FC -> SE."""
 
     def __init__(self, c_in: int, n_features: int, kernel: int, stride: int,
-                 tds_channels: int, tds_kernel: int, se_reduction: int):
+                 tds_channels: int, tds_kernel: int, se_reduction: int, norm: str = "time"):
         super().__init__()
         if kernel % 2 == 0:
             raise ValueError("conv_kernels must be odd")
         self.conv = nn.Conv1d(c_in, n_features, kernel, stride=stride, padding=kernel // 2)
-        self.norm = ChannelLayerNorm(n_features)
+        self.norm = ChannelLayerNorm(n_features, norm)
         if tds_kernel:
             self.tds = nn.Sequential(
-                TdsConvBlock(tds_channels, n_features // tds_channels, tds_kernel),
-                TdsFullyConnectedBlock(n_features),
+                TdsConvBlock(tds_channels, n_features // tds_channels, tds_kernel, norm),
+                TdsFullyConnectedBlock(n_features, norm),
                 SqueezeExcite(n_features, se_reduction),
             )
         else:
@@ -269,7 +291,7 @@ class TdsStage(nn.Module):
 
 class TdsFeaturizer(nn.Module):
     def __init__(self, n_in: int, n_features: int, tds_channels: int, conv_kernels,
-                 conv_strides, tds_kernels, se_reduction: int):
+                 conv_strides, tds_kernels, se_reduction: int, norm: str = "time"):
         super().__init__()
         if not len(conv_kernels) == len(conv_strides) == len(tds_kernels):
             raise ValueError("conv_kernels, conv_strides and tds_kernels must have the same length")
@@ -277,7 +299,7 @@ class TdsFeaturizer(nn.Module):
             raise ValueError("tds_features must be a multiple of tds_channels")
         self.stages = nn.ModuleList(
             TdsStage(n_in if i == 0 else n_features, n_features, conv_kernels[i],
-                     conv_strides[i], tds_channels, tds_kernels[i], se_reduction)
+                     conv_strides[i], tds_channels, tds_kernels[i], se_reduction, norm)
             for i in range(len(conv_kernels))
         )
         self.downsample = math.prod(conv_strides)
@@ -357,7 +379,7 @@ class EmgFormerModel(nn.Module):
         "filter_order", "filter_pad",
         "norm", "norm_eps",
         "tds_features", "tds_channels", "conv_kernels", "conv_strides", "tds_kernels",
-        "se_reduction",
+        "se_reduction", "tds_norm",
         "d_model", "n_layers", "n_heads", "d_ffn", "dropout", "rope_base",
         "head_hidden",
     )
@@ -374,7 +396,7 @@ class EmgFormerModel(nn.Module):
         norm: str = "zscore", norm_eps: float = 1e-12,
         tds_features: int = 256, tds_channels: int = 8,
         conv_kernels=(11, 5, 9, 3), conv_strides=(5, 2, 5, 1), tds_kernels=(0, 0, 5, 3),
-        se_reduction: int = 16,
+        se_reduction: int = 16, tds_norm: str = "time",
         d_model: int = 256, n_layers: int = 3, n_heads: int = 4, d_ffn: int = 512,
         dropout: float = 0.1, rope_base: float = 10000.0,
         head_hidden: int = 0,
@@ -388,7 +410,7 @@ class EmgFormerModel(nn.Module):
         self.norm = WindowNorm(norm_eps) if norm == "zscore" else nn.Identity()
         self.featurizer = TdsFeaturizer(n_in_channels, tds_features, tds_channels,
                                         tuple(conv_kernels), tuple(conv_strides),
-                                        tuple(tds_kernels), se_reduction)
+                                        tuple(tds_kernels), se_reduction, tds_norm)
         self.proj = nn.Identity() if tds_features == d_model else nn.Linear(tds_features, d_model)
         self.layers = nn.ModuleList(
             TransformerLayer(d_model, n_heads, d_ffn, dropout, rope_base) for _ in range(n_layers)

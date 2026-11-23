@@ -109,6 +109,31 @@ def test_short_window_and_gradients():
                for p in net.parameters() if p.requires_grad)
 
 
+def _envelope_sensitivity(kind):
+    """How much the token energy follows a 5x amplitude step in the middle of the window."""
+    torch.manual_seed(0)
+    feat = m.TdsFeaturizer(C, 256, 8, (11, 5, 9, 3), (5, 2, 5, 1), (0, 0, 5, 3), 16, kind).eval()
+    x = torch.randn(4, C, T)
+    x[..., T // 2:] *= 5.0
+    with torch.no_grad():
+        z = feat(m.WindowNorm()(x))                              # (B, F, 200)
+    quiet, loud = z[..., 20:80], z[..., 120:180]
+    return ((loud.mean((0, 2)) - quiet.mean((0, 2))).abs() / z.std((0, 2))).mean().item()
+
+
+def test_featurizer_keeps_the_envelope():
+    """Per-time-step normalisation erases amplitude changes along the window; the default must not."""
+    assert _envelope_sensitivity("time") > 3 * _envelope_sensitivity("step")
+    assert _envelope_sensitivity("batch") > 3 * _envelope_sensitivity("step")
+
+
+@pytest.mark.parametrize("kind", ["time", "batch", "step"])
+def test_tds_norm_kinds(kind):
+    net = _build(tds_norm=kind, **SIZES["S"])
+    with torch.no_grad():
+        assert net(torch.randn(B, C, T)).shape == (B, T, J)
+
+
 def test_config_registered():
     from neuraltrain.models import BaseBrainModelConfig
     assert "EmgFormer" in {c.__name__ for c in BaseBrainModelConfig.__subclasses__()}

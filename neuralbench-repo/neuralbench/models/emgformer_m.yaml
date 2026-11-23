@@ -43,6 +43,12 @@ brain_model_config:
   conv_strides: [5, 2, 5, 1]
   tds_kernels: [0, 0, 5, 3]
   se_reduction: 16
+  # Normalisation inside the featurizer:
+  #   time   over features and time of each window (original TDS paper); default
+  #   batch  BatchNorm
+  #   step   each time step on its own -- removes the EMG envelope; the model
+  #          then predicts a constant pose (first emgformer_m run, val R2 ~ 0)
+  tds_norm: time
   # ======================================================================
   # Transformer with RoPE, post-norm -- the EMGFormer-M row of Table S12.
   # ======================================================================
@@ -54,11 +60,13 @@ brain_model_config:
   head_hidden: 0          # Linear -> GELU -> Linear head; 0 = d_model
 
 # Paper optimiser (App. D.2): AdamW, lr 5e-4 cosine-annealed to 5e-6,
-# weight decay 1e-2, gradient clipping 1.0. The cosine runs over the full
-# n_epochs (task default 100; the paper trains 150). Loss stays the task's
-# L1 on valid frames, which is the paper's masked angular MAE in radians.
-# The paper's augmentations are not reproduced; the task's electrode
-# rotation is used instead.
+# weight decay 1e-2, gradient clipping 1.0. A warm-up is added here (not in
+# the paper's text): without it the M size collapsed to a constant output in
+# a toy test. OneCycleLR: 2e-5 -> 5e-4 over the first 5 % of the steps, then
+# cosine down to 5e-6, over the full n_epochs (task default 100; paper 150).
+# Loss stays the task's L1 on valid frames, which is the paper's masked
+# angular MAE in radians. The paper's augmentations are not reproduced; the
+# task's electrode rotation is used instead.
 lightning_optimizer_config:
   =replace=: true
   optimizer:
@@ -68,13 +76,13 @@ lightning_optimizer_config:
       weight_decay: 0.01
       betas: [0.9, 0.999]
   scheduler:
-    name: CosineAnnealingLR
+    name: OneCycleLR
     kwargs:
-      # Placeholder only: neuralbench replaces T_max with the run's total number
-      # of optimiser steps (pl_module.configure_optimizers). It has to be present
-      # because the kwargs are validated before that value is filled in.
-      T_max: 1
-      eta_min: 5.0e-6
+      max_lr: 5.0e-4
+      pct_start: 0.05
+      anneal_strategy: cos
+      div_factor: 25.0          # start lr = max_lr / 25 = 2e-5
+      final_div_factor: 4.0     # final lr = start lr / 4 = 5e-6
   interval: step
 trainer_config:
   gradient_clip_val: 1.0
